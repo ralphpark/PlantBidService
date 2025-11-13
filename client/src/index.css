@@ -1,0 +1,116 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 채팅 메시지 스타일 - 강화버전 */
+.text-wrap-force {
+  white-space: pre-wrap !important;
+  overflow-wrap: break-word !important;
+  word-break: break-all !important;
+  word-wrap: break-word !important;
+  overflow: visible !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  height: auto !important;
+  max-height: none !important;
+}
+
+pre.chat-message {
+  white-space: pre-wrap !important;
+  word-wrap: break-word !important;
+  word-break: break-all !important;
+  max-width: 100% !important;
+  width: 100% !important;
+  overflow-wrap: break-word !important;
+  line-height: 1.5 !important;
+  display: block !important;
+  min-height: 1.5em !important;
+  font-family: inherit !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: inherit !important;
+  overflow: visible !important;
+  height: auto !important;
+  max-height: none !important;
+  text-overflow: unset !important;
+  column-width: auto !important;
+}
+
+/* 특별 강화 스타일 - 모든 메시지 텍스트에 적용 */
+.bg-white pre,
+.bg-primary\/10 pre,
+[class*="bg-"] pre {
+  white-space: pre-wrap !important;
+  overflow-wrap: break-word !important;
+  word-break: break-all !important;
+  max-width: 100% !important;
+  width: 100% !important;
+  overflow: visible !important;
+}
+
+/* 새로운 줄 단위 메시지 처리 */
+.chat-message-container {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  padding: 0;
+  margin: 0;
+}
+
+/* 채팅 메시지 전용 스타일 */
+.chat-message {
+  white-space: pre-wrap !important;
+  overflow-wrap: break-word !important;
+  word-break: break-word !important;
+  width: 100% !important;
+  overflow: visible !important;
+  line-height: 1.5 !important;
+}
+
+.chat-message-line {
+  width: 100%;
+  min-height: 1.5em;
+  padding: 0;
+  margin-bottom: 4px;
+}
+
+/* Firebase reCAPTCHA 오류 해결을 위한 스타일 */
+.firebase-recaptcha-container iframe {
+  display: none !important;
+}
+.firebase-recaptcha-container div[style*="visibility: visible"] {
+  display: none !important;
+}
+.firebase-recaptcha-container div[style*="visibility: hidden"] {
+  display: none !important;
+}
+#invisible-recaptcha {
+  position: fixed;
+  top: -9999px;
+  left: -9999px;
+  z-index: -9999;
+  visibility: hidden;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply font-sans antialiased bg-background text-foreground;
+  }
+  
+  /* 채팅 영역에서 스크롤 동작 개선 */
+  #chat-container {
+    scroll-behavior: smooth;
+  }
+}
