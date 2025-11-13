@@ -1,0 +1,2198 @@
+import { useState, useEffect, useRef } from "react";
+import { Redirect, useLocation } from "wouter";
+import { useAuth } from "@/hooks/use-auth";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useToast } from "@/hooks/use-toast";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { Progress } from "@/components/ui/progress";
+import { 
+  Store, Bell, Settings, ShoppingBag, Package, MapPin, 
+  ChevronRight, MessageSquare, Filter, Search, PlusCircle,
+  Edit, Trash, MessageCircle, CheckCircle, Clock, LogOut,
+  Upload, ImagePlus, Truck, AlertCircle, Send, User, Phone,
+  Loader2
+} from "lucide-react";
+import LocationSettings from "@/components/location/location-settings";
+import ProductDialog from "@/components/product/product-dialog";
+
+// 주문 상태 타입
+export type OrderStatus = 'pending' | 'reviewing' | 'preparing' | 'bidded' | 'accepted' | 'shipped' | 'completed' | 'rejected';
+
+// 채팅 메시지 인터페이스
+interface ChatMessage {
+  role: 'user' | 'assistant' | 'vendor';
+  content: string;
+  timestamp: Date;
+  recommendations?: any[];
+  imageUrl?: string; // 참고 이미지 URL
+  
+  // 판매자 입찰 정보 (판매자 메시지인 경우)
+  productInfo?: {
+    name: string;
+    description?: string;
+    imageUrl?: string;
+    price?: number | string;
+  };
+  price?: number | string;
+  referenceImages?: string[] | string;
+}
+
+// 주문 인터페이스
+interface Order {
+  id: string;
+  bidId?: number; // 실제 bid ID 참조
+  customer: {
+    name: string;
+    phone: string;
+    address: string;
+    userId?: number; // 고객 ID 추가
+  };
+  type: 'ai' | 'direct'; // AI 컨설팅 또는 직접 주문
+  status: OrderStatus;
+  date: Date;
+  items?: {
+    plantId: string;
+    name: string;
+    quantity: number;
+    price: number;
+  }[];
+  conversation?: {
+    id?: number; // 대화 ID 추가
+    messages?: ChatMessage[]; // 전체 대화 내용
+    recommendations?: {
+      plantId: string;
+      name: string;
+      imageUrl: string;
+      description: string;
+    }[];
+  };
+  notes?: string;
+  bidAmount?: number;
+  vendorMessage?: string;
+  referenceImages?: string[]; // 참고 이미지 URL 배열
+  selectedProductId?: number; // 판매자가 선택한 제품 ID
+  plant?: {
+    id?: number;
+    name?: string;
+    imageUrl?: string;
+    description?: string;
+    priceRange?: string;
+  };
+}
+
+// 주문 상세 컴포넌트 인터페이스
+interface OrderDetailsProps {
+  order: Order;
+  onUpdateStatus: (orderId: string, status: OrderStatus) => void;
+  onUpdateBid: (orderId: string, bidData: Partial<BidData>) => void;
+  products: Product[];
+}
+
+interface Product {
+  id: string;
+  name: string;
+  description: string;
+  price: number;
+  stock: number;
+  imageUrl: string;
+  category: string;
+}
+
+interface Notification {
+  id: string;
+  type: 'order' | 'message' | 'system';
+  title: string;
+  description: string;
+  isRead: boolean;
+  date: Date;
+}
+
+interface BidData {
+  id: number;
+  userId: number;
+  vendorId: number;
+  plantId: number;
+  price: number;
+  status: string;
+  createdAt: string;
+  additionalServices?: string | null;
+  deliveryDate?: string | null;
+  conversationId?: number; // 연결된 대화 ID
+  selectedProductId?: number; // 선택한 제품 ID
+  vendorMessage?: string; // 판매자 메시지
+  referenceImages?: string[]; // 참고 이미지 URL 배열
+  customer?: {
+    id?: number;
+    name?: string;
+    email?: string;
+    phone?: string; // 전화번호 추가
+  };
+  plant?: {
+    id?: number;
+    name?: string;
+    imageUrl?: string;
+    description?: string;
+    priceRange?: string;
+  };
+}
+
+// 상태 배지 컴포넌트
+function OrderStatusBadge({ status }: { status: string }) {
+  let color = 'bg-muted text-muted-foreground';
+  let text = '상태 정보 없음';
+  
+  switch (status) {
+    case 'pending':
+      color = 'bg-yellow-100 text-yellow-800';
+      text = '대기 중';
+      break;
+    case 'reviewing':
+      color = 'bg-blue-100 text-blue-800';
+      text = '검토 중';
+      break;
+    case 'preparing':
+      color = 'bg-orange-100 text-orange-800';
+      text = '준비 중';
+      break;
+    case 'bidded':
+      color = 'bg-purple-100 text-purple-800';
+      text = '입찰됨';
+      break;
+    case 'accepted':
+      color = 'bg-green-100 text-green-800';
+      text = '승인됨';
+      break;
+    case 'shipped':
+      color = 'bg-blue-100 text-blue-800';
+      text = '배송 중';
+      break;
+    case 'completed':
+      color = 'bg-green-100 text-green-800';
+      text = '완료됨';
+      break;
+    case 'rejected':
+      color = 'bg-red-100 text-red-800';
+      text = '거부됨';
+      break;
+  }
+  
+  return (
+    <span className={`px-2 py-1 rounded-full text-xs font-medium ${color}`}>
+      {text}
+    </span>
+  );
+}
+
+// OrderDetails 컴포넌트
+function OrderDetails({ order, onUpdateStatus, onUpdateBid, products }: OrderDetailsProps) {
+  console.log("OrderDetails 렌더링:", order.id, "상태:", order.status, "금액:", order.bidAmount);
+  
+  // useState에서 상태 초기화할 때 order 객체를 직접 참조하지 않고 
+  // 함수 형태로 최신 props를 사용하도록 수정
+  const [bidAmount, setBidAmount] = useState<string>(() => order.bidAmount?.toString() || '');
+  const [vendorMessage, setVendorMessage] = useState<string>(() => order.vendorMessage || '');
+  const [selectedProductId, setSelectedProductId] = useState<string>(() => order.selectedProductId?.toString() || '');
+  const [messageText, setMessageText] = useState<string>('');
+  const [showChatHistory, setShowChatHistory] = useState<boolean>(true);
+  const [referenceImages, setReferenceImages] = useState<string[]>(() => order.referenceImages || []);
+  const [imageUploadOpen, setImageUploadOpen] = useState<boolean>(false);
+  const [isUploading, setIsUploading] = useState<boolean>(false);
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
+  const { toast } = useToast();
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  
+  // order prop이 변경될 때마다 상태 업데이트
+  useEffect(() => {
+    console.log("입찰 정보 업데이트:", order.id, "금액:", order.bidAmount, "메시지:", order.vendorMessage);
+    setBidAmount(order.bidAmount?.toString() || '');
+    setVendorMessage(order.vendorMessage || '');
+    setSelectedProductId(order.selectedProductId?.toString() || '');
+    setReferenceImages(order.referenceImages || []);
+  }, [order.id, order.bidAmount, order.vendorMessage, order.selectedProductId, order.referenceImages]);
+  
+  // 스크롤을 채팅의 맨 아래로 이동
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [order.conversation?.messages]);
+  
+  // 연관된 상품 가져오기
+  const getRelatedProducts = () => {
+    if (!products || products.length === 0) return [];
+    
+    // 고객이 요청한 식물과 관련된 제품 우선 표시
+    const plantName = order.plant?.name?.toLowerCase() || '';
+    
+    // 정확히 일치하는 상품 먼저 필터링
+    const exactMatches = products.filter((p: Product) => 
+      p.name.toLowerCase() === plantName || 
+      p.name.toLowerCase().includes(plantName) || 
+      plantName.includes(p.name.toLowerCase())
+    );
+    
+    // 정확히 일치하는 상품이 없으면 전체 상품 반환
+    return exactMatches.length > 0 ? exactMatches : products;
+  };
+  
+  // 메시지 전송 처리
+  const handleSendMessage = async () => {
+    if (!messageText.trim()) return;
+    
+    // 대화 ID 확인
+    if (!order.conversation?.id) {
+      toast({
+        title: "대화 ID가 없습니다",
+        description: "이 주문에 연결된 대화가 없습니다.",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    try {
+      // 1. 대화 내용 가져오기
+      const convResponse = await fetch(`/api/conversations/${order.conversation.id}`);
+      if (!convResponse.ok) {
+        throw new Error("대화 정보를 가져오는데 실패했습니다");
+      }
+      
+      const convData = await convResponse.json();
+      let messages = Array.isArray(convData.messages) 
+        ? convData.messages 
+        : (typeof convData.messages === 'string' 
+          ? JSON.parse(convData.messages) 
+          : []);
+      
+      // 2. 새 판매자 메시지 추가
+      // 타입에 관계없이 제품 ID 비교
+      const selectedProduct = selectedProductId 
+        ? products.find(p => String(p.id) === String(selectedProductId)) 
+        : null;
+      
+      console.log("메시지 전송 시 선택된 제품:", selectedProduct, "ID:", selectedProductId);
+      
+      const vendorMessage = {
+        role: "vendor", // 중요: 판매자 역할 지정
+        content: messageText,
+        timestamp: new Date().toISOString(),
+        
+        // 상품 정보 추가 (사용 가능한 경우)
+        ...(selectedProduct ? {
+          productInfo: {
+            name: selectedProduct.name,
+            description: selectedProduct.description,
+            imageUrl: selectedProduct.imageUrl,
+            price: selectedProduct.price
+          },
+          price: selectedProduct.price
+        } : {}),
+        
+        // 참조 이미지가 있는 경우 추가
+        ...(referenceImages && referenceImages.length > 0 ? {
+          referenceImages: referenceImages
+        } : {})
+      };
+      
+      messages.push(vendorMessage);
+      
+      // 3. 대화 업데이트
+      const updateResponse = await fetch(`/api/conversations/${order.conversation.id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ messages })
+      });
+      
+      if (!updateResponse.ok) {
+        throw new Error("메시지 업데이트에 실패했습니다");
+      }
+      
+      // 메시지가 전송되었음을 알림
+      toast({
+        title: "메시지가 전송되었습니다",
+        description: "고객은 AI 챗봇 창에서 메시지를 확인할 수 있습니다.",
+      });
+      
+      // 입력 필드 초기화
+      setMessageText('');
+      
+      // 대화 목록 새로고침 (선택적)
+      if (order.conversation && order.conversation.messages) {
+        // 타입 문제를 해결하기 위해 적절한 타입으로 변환 (문자열로 비교)
+        const selectedProduct = selectedProductId 
+          ? products.find(p => String(p.id) === String(selectedProductId)) 
+          : null;
+          
+        console.log("로컬 UI 업데이트 시 선택된 제품:", selectedProduct);
+        
+        const typedVendorMessage: ChatMessage = {
+          role: "vendor",
+          content: messageText,
+          timestamp: new Date(),
+          recommendations: [],
+          
+          // 상품 정보 추가 (사용 가능한 경우)
+          ...(selectedProduct ? {
+            productInfo: {
+              name: selectedProduct.name,
+              description: selectedProduct.description,
+              imageUrl: selectedProduct.imageUrl,
+              price: selectedProduct.price
+            },
+            price: selectedProduct.price
+          } : {}),
+          
+          // 참조 이미지가 있는 경우 추가
+          ...(referenceImages && referenceImages.length > 0 ? {
+            referenceImages: referenceImages
+          } : {})
+        };
+        const updatedMessages = [...order.conversation.messages, typedVendorMessage];
+        order.conversation.messages = updatedMessages;
+      }
+    } catch (error) {
+      console.error('메시지 전송 오류:', error);
+      toast({
+        title: "메시지 전송 실패",
+        description: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+        variant: "destructive"
+      });
+    }
+  };
+  
+  // 입찰 확정 처리
+  const handleConfirmBid = async () => {
+    if (!bidAmount || parseFloat(bidAmount) <= 0) {
+      toast({
+        title: "입찰 금액을 입력해주세요",
+        description: "유효한 금액을 입력해야 입찰을 완료할 수 있습니다.",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    // 선택한 제품 검증
+    if (!selectedProductId) {
+      toast({
+        title: "상품을 선택해주세요",
+        description: "입찰에 포함할 상품을 선택해야 합니다.",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    try {
+      // 입력값 로컬 변수에 저장 (초기화 전에 사용하기 위해)
+      const messageToSend = vendorMessage;
+      const imagesToReference = [...referenceImages]; // 배열 복사
+      const bidAmountValue = parseFloat(bidAmount);
+      const selectedProductIdValue = parseInt(selectedProductId);
+      
+      // 현재 선택된 제품 정보 (초기화 전 저장) - 더 명확한 디버깅 처리
+      console.log("입찰 확정 처리 중 제품 ID:", selectedProductId, "타입:", typeof selectedProductId);
+      console.log("선택한 제품 ID:", selectedProductId);
+      console.log("사용 가능한 제품들:", products.map(p => ({id: p.id, name: p.name, type: typeof p.id})));
+      
+      // 항상 문자열 기반 비교를 통해 일관성 보장
+      let selectedProduct = products.find(p => String(p.id) === String(selectedProductId));
+      
+      // 제품을 찾지 못했을 경우 특별 처리 - typescript에서 타입 비교 오류 방지를 위한 수정
+      if (!selectedProduct) {
+        // 심다6(ID 9)의 특별 케이스 - 떡갈고무나무(ID 10) 제품 검색 시도
+        if (String(selectedProductId) === "10") {
+          console.log("심다6의 떡갈고무나무 검색 실패 - 강제 검색 시도", selectedProductId);
+          // 타입 안전 비교 구현
+          const product10 = products.find(p => String(p.id) === "10");
+          
+          if (product10) {
+            console.log("떡갈고무나무(ID 10) 제품 강제 검색 성공:", product10);
+            selectedProduct = product10;
+          }
+        }
+      }
+      
+      // 여전히 제품을 찾지 못한 경우 오류 발생
+      if (!selectedProduct) {
+        console.error("제품을 찾을 수 없음:", selectedProductId, "사용 가능한 제품:", products.map(p => ({id: p.id, name: p.name})));
+        throw new Error("선택한 제품 정보를 찾을 수 없습니다.");
+      }
+      
+      // 저장 전 현재 상태 백업
+      const originalBidAmount = bidAmount;
+      const originalVendorMessage = vendorMessage;
+      const originalReferenceImages = [...referenceImages];
+      const originalSelectedProductId = selectedProductId;
+      
+      // 입찰 데이터 업데이트
+      const bidData: Partial<BidData> = {
+        status: 'bidded',
+        price: bidAmountValue,
+        selectedProductId: selectedProductIdValue,
+        vendorMessage: messageToSend,
+        referenceImages: imagesToReference
+      };
+      
+      console.log("입찰 데이터:", bidData);
+      
+      // 입찰 정보 업데이트 (실제 API 호출)
+      try {
+        // API 호출로 입찰 정보 업데이트 (부모 컴포넌트의 함수 사용)
+        await onUpdateBid(order.id, bidData);
+        
+        // 그 다음 상태 업데이트
+        await onUpdateStatus(order.id, 'bidded');
+        
+        // 성공 메시지
+        toast({
+          title: "입찰이 완료되었습니다",
+          description: "고객에게 입찰 정보가 전송되었습니다.",
+        });
+        
+        // 필드를 초기화하지 않고 order 객체만 업데이트
+        // order 객체 업데이트 (화면에 계속 표시되도록)
+        if (order && order.conversation) {
+          const selectedProductInfo = {
+            id: selectedProductIdValue,
+            name: selectedProduct.name,
+            description: selectedProduct.description,
+            imageUrl: selectedProduct.imageUrl,
+            price: selectedProduct.price
+          };
+          
+          // 대화에 메시지 추가 (로컬 UI 업데이트)
+          if (order.conversation.messages) {
+            // 기존 메시지에 추가
+            const newVendorMessage: ChatMessage = {
+              role: 'vendor',
+              content: messageToSend,
+              timestamp: new Date(),
+              productInfo: selectedProductInfo,
+              price: bidAmountValue,
+              referenceImages: imagesToReference
+            };
+            
+            // 직접 메시지 추가
+            order.conversation.messages = [
+              ...order.conversation.messages,
+              newVendorMessage
+            ];
+          }
+          
+          // 주문 상태 업데이트 (로컬)
+          // UI 유지를 위해 order 객체의 상태와 관련 정보 업데이트
+          order.bidAmount = bidAmountValue;
+          order.vendorMessage = messageToSend;
+          order.referenceImages = imagesToReference;
+          order.selectedProductId = selectedProductIdValue;
+          order.status = 'bidded';
+        }
+      } catch (error) {
+        console.error("입찰 정보 저장 오류:", error);
+        
+        // 오류 발생 시 이전 상태로 복원
+        setBidAmount(originalBidAmount);
+        setVendorMessage(originalVendorMessage);
+        setReferenceImages(originalReferenceImages);
+        setSelectedProductId(originalSelectedProductId);
+        
+        throw error;
+      }
+    } catch (error) {
+      console.error("입찰 확정 오류:", error);
+      toast({
+        title: "입찰 확정 실패",
+        description: "입찰 정보를 저장하는 중 오류가 발생했습니다.",
+        variant: "destructive"
+      });
+    }
+  };
+  
+  // 제품이 선택되었을 때
+  const handleProductSelected = (productId: string) => {
+    setSelectedProductId(productId);
+    
+    // 선택한 제품의 가격을 입찰 금액에 자동 설정 (타입 문제 해결을 위해 문자열 변환 비교)
+    console.log("제품 선택 처리 중 ID:", productId, "타입:", typeof productId);
+    console.log("찾을 제품 ID:", productId);
+    console.log("사용 가능한 제품들:", products.map(p => ({id: p.id, name: p.name, type: typeof p.id})));
+    
+    // 동일하게 문자열 기반 비교 사용
+    const selectedProduct = products.find(p => String(p.id) === String(productId));
+    
+    // 제품을 찾지 못했을 경우 특별 처리 - typescript 타입 안전성 개선
+    if (!selectedProduct && String(productId) === "10") {
+      console.log("심다6(ID 9)의 제품 ID 10 특별 처리 시작");
+      // 제품 ID 10에 대한 특별 처리 - 문자열 기반 일관된 비교
+      const product10 = products.find(p => String(p.id) === "10");
+      
+      if (product10) {
+        console.log("특별 처리 성공 - 떡갈고무나무 제품 찾음:", product10);
+        setBidAmount(product10.price.toString());
+        
+        // 제품이 선택되면 자동으로 '제품 준비' 상태로 변경
+        if (order.status === 'pending' || order.status === 'reviewing') {
+          // 제품 준비중 상태로 업데이트
+          onUpdateStatus(order.id, 'preparing');
+          
+          toast({
+            title: "제품 준비 상태로 변경됨",
+            description: "상품을 선택하여 자동으로 제품 준비 상태로 변경되었습니다.",
+          });
+        }
+        return;
+      }
+    }
+    
+    if (selectedProduct) {
+      console.log("선택된 제품 정보:", selectedProduct);
+      setBidAmount(selectedProduct.price.toString());
+      
+      // 제품이 선택되면 자동으로 '제품 준비' 상태로 변경
+      if (order.status === 'pending' || order.status === 'reviewing') {
+        // 제품 준비중 상태로 업데이트
+        onUpdateStatus(order.id, 'preparing');
+        
+        toast({
+          title: "제품 준비 상태로 변경됨",
+          description: "상품을 선택하여 자동으로 제품 준비 상태로 변경되었습니다.",
+        });
+      }
+    } else {
+      console.error("제품을 찾을 수 없음:", productId);
+      
+      toast({
+        title: "제품을 찾을 수 없음",
+        description: `ID가 ${productId}인 제품을 찾을 수 없습니다.`,
+        variant: "destructive"
+      });
+    }
+  };
+  
+  // 이미지 URL 추가 (최대 5장)
+  const handleAddReferenceImage = (imageUrl: string) => {
+    if (imageUrl && !referenceImages.includes(imageUrl) && referenceImages.length < 5) {
+      setReferenceImages([...referenceImages, imageUrl]);
+    } else if (referenceImages.length >= 5) {
+      toast({
+        title: "이미지 개수 초과",
+        description: "참고 이미지는 최대 5장까지만 추가할 수 있습니다.",
+        variant: "destructive"
+      });
+    }
+  };
+  
+  // 이미지 URL 제거
+  const handleRemoveReferenceImage = (index: number) => {
+    const newImages = [...referenceImages];
+    newImages.splice(index, 1);
+    setReferenceImages(newImages);
+  };
+  
+  // 이미지 파일 업로드 처리
+  const handleUploadImage = async () => {
+    const fileInput = document.getElementById('imageFile') as HTMLInputElement;
+    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+      toast({
+        title: "파일을 선택해주세요",
+        description: "업로드할 이미지 파일을 선택해야 합니다.",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    // 파일 배열로 변환 (FileList는 배열이 아니기 때문에)
+    const files = Array.from(fileInput.files);
+    
+    // 이미 업로드된 이미지 개수 확인
+    const remainingSlots = 5 - referenceImages.length;
+    
+    // 선택한 파일 개수가 남은 슬롯보다 많은 경우 제한
+    if (files.length > remainingSlots) {
+      toast({
+        title: "이미지 개수 제한",
+        description: `최대 ${remainingSlots}개의 이미지만 추가할 수 있습니다.`,
+        variant: "destructive"
+      });
+      // 남은 슬롯 수만큼만 처리하도록 제한
+      files.splice(remainingSlots);
+    }
+    
+    // 각 파일 검사
+    for (const file of files) {
+      // 파일 크기 검증 (5MB 제한)
+      if (file.size > 5 * 1024 * 1024) {
+        toast({
+          title: "파일 크기 초과",
+          description: `${file.name} - 파일 크기는 5MB를 초과할 수 없습니다.`,
+          variant: "destructive"
+        });
+        continue; // 이 파일은 건너뛰고 다음 파일 처리
+      }
+      
+      // 이미지 파일 타입 검증
+      if (!file.type.startsWith('image/')) {
+        toast({
+          title: "이미지 파일만 가능합니다",
+          description: `${file.name} - JPG, PNG, GIF 등의 이미지 파일만 업로드할 수 있습니다.`,
+          variant: "destructive"
+        });
+        continue; // 이 파일은 건너뛰고 다음 파일 처리
+      }
+    }
+    
+    // 유효한 파일만 필터링
+    const validFiles = files.filter(file => 
+      file.size <= 5 * 1024 * 1024 && file.type.startsWith('image/')
+    );
+    
+    if (validFiles.length === 0) {
+      toast({
+        title: "업로드할 유효한 이미지 없음",
+        description: "선택한 파일 중 업로드 가능한 이미지가 없습니다.",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    try {
+      setIsUploading(true);
+      setUploadProgress(10);
+      
+      // 모든 파일 업로드 처리
+      const uploadPromises = validFiles.map(async (file) => {
+        // FormData 생성
+        const formData = new FormData();
+        formData.append('image', file);
+        
+        // 업로드 요청
+        const response = await fetch('/api/upload-image', {
+          method: 'POST',
+          body: formData
+        });
+        
+        if (!response.ok) {
+          throw new Error(`${file.name} 업로드에 실패했습니다.`);
+        }
+        
+        const data = await response.json();
+        
+        if (data.success && data.imageUrl) {
+          return data.imageUrl;
+        } else {
+          throw new Error(`${file.name} URL을 받아오지 못했습니다.`);
+        }
+      });
+      
+      // 업로드 진행 상태 표시 (50%)
+      setUploadProgress(50);
+      
+      // 모든 업로드 완료 대기
+      const uploadedUrls = await Promise.all(uploadPromises);
+      
+      // 업로드 완료 (100%)
+      setUploadProgress(100);
+      
+      // 이미지 URL 추가
+      let addedCount = 0;
+      for (const url of uploadedUrls) {
+        if (referenceImages.length + addedCount < 5) {
+          // referenceImages 상태는 컴포넌트가 업데이트될 때마다 새로 작성되므로 개별적으로 처리
+          if (!referenceImages.includes(url)) {
+            addedCount++;
+          }
+        } else {
+          break; // 최대 5개까지만 추가
+        }
+      }
+      
+      // 모든 URL을 한 번에 추가
+      const uniqueUrls = uploadedUrls.filter(url => !referenceImages.includes(url));
+      const newReferenceImages = [...referenceImages, ...uniqueUrls.slice(0, 5 - referenceImages.length)];
+      setReferenceImages(newReferenceImages);
+      
+      toast({
+        title: "이미지 업로드 성공",
+        description: `${uploadedUrls.length}개의 이미지가 성공적으로 업로드되었습니다.`,
+      });
+      
+      // 다이얼로그 닫기
+      setImageUploadOpen(false);
+    } catch (error: any) {
+      console.error('이미지 업로드 오류:', error);
+      toast({
+        title: "이미지 업로드 실패",
+        description: error.message || "알 수 없는 오류가 발생했습니다",
+        variant: "destructive"
+      });
+    } finally {
+      setIsUploading(false);
+      setUploadProgress(0);
+    }
+  };
+  
+  // 주문 처리 상태 진행 표시
+  return (
+    <div className="space-y-6">
+      {/* 주문 진행 상태 */}
+      <div>
+        <h4 className="font-medium mb-2">주문 진행 상태</h4>
+        <div>
+          <Card>
+            <CardContent className="p-4 space-y-4">
+              <div className="flex gap-3 items-center">
+                <div className={`rounded-full p-1 ${order.status !== 'rejected' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                  <CheckCircle className="h-4 w-4" />
+                </div>
+                <div className="text-sm">
+                  <div className="font-medium">주문 접수</div>
+                  <div className="text-muted-foreground">
+                    {new Date(order.date).toLocaleDateString('ko-KR')}에 접수됨
+                  </div>
+                </div>
+              </div>
+              
+              <div className="flex gap-3 items-center">
+                <div className={`rounded-full p-1 ${order.status === 'reviewing' || order.status === 'preparing' || order.status === 'bidded' ? 'bg-green-100 text-green-700' : 'bg-muted text-muted-foreground'}`}>
+                  <CheckCircle className="h-4 w-4" />
+                </div>
+                <div className="text-sm">
+                  <div className="font-medium">주문 검토</div>
+                  <div className="text-muted-foreground">
+                    {order.status === 'reviewing' || order.status === 'preparing' || order.status === 'bidded' ? '완료됨' : '진행 중'}
+                  </div>
+                </div>
+              </div>
+              
+              <div className="flex gap-3 items-center">
+                <div className={`rounded-full p-1 ${order.status === 'preparing' || order.status === 'bidded' ? 'bg-green-100 text-green-700' : 'bg-muted text-muted-foreground'}`}>
+                  <CheckCircle className="h-4 w-4" />
+                </div>
+                <div className="text-sm">
+                  <div className="font-medium">제품 준비</div>
+                  <div className="text-muted-foreground">
+                    {order.status === 'preparing' || order.status === 'bidded' ? '진행 중' : '대기 중'}
+                  </div>
+                </div>
+              </div>
+              
+              <div className="flex gap-3 items-center">
+                <div className={`rounded-full p-1 ${order.status === 'bidded' ? 'bg-green-100 text-green-700' : 'bg-muted text-muted-foreground'}`}>
+                  <CheckCircle className="h-4 w-4" />
+                </div>
+                <div className="text-sm">
+                  <div className="font-medium">입찰 완료</div>
+                  <div className="text-muted-foreground">
+                    {order.status === 'bidded' ? '완료됨' : '대기 중'}
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+      
+      {/* 고객이 요청한 식물 정보 */}
+      {order.plant && (
+        <div>
+          <h4 className="font-medium mb-2">고객 선택 식물</h4>
+          <Card>
+            <CardContent className="p-3">
+              <div className="flex items-center gap-4">
+                {order.plant.imageUrl ? (
+                  <div className="h-16 w-16 rounded-md bg-muted overflow-hidden">
+                    <img 
+                      src={order.plant.imageUrl} 
+                      alt={order.plant.name || '식물 이미지'} 
+                      className="h-full w-full object-cover" 
+                    />
+                  </div>
+                ) : (
+                  <div className="h-16 w-16 rounded-md bg-muted flex items-center justify-center">
+                    <Package className="h-8 w-8 text-muted-foreground" />
+                  </div>
+                )}
+                <div className="flex-1">
+                  <div className="font-medium">{order.plant.name || '식물 이름 없음'}</div>
+                  <div className="text-sm text-muted-foreground line-clamp-2 mt-1">
+                    {order.plant.description || '설명 없음'}
+                  </div>
+                  {order.plant.priceRange && (
+                    <div className="text-sm mt-1">고객 예상 가격: {order.plant.priceRange}</div>
+                  )}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+      
+      {/* AI 컨설팅 대화 */}
+      {order.type === 'ai' && (
+        <div>
+          <div className="flex justify-between items-center mb-2">
+            <h4 className="font-medium">AI 컨설팅 대화</h4>
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              onClick={() => setShowChatHistory(!showChatHistory)}
+            >
+              {showChatHistory ? '접기' : '펼치기'}
+            </Button>
+          </div>
+          
+          {showChatHistory && (
+            <Card>
+              <CardContent className="p-4 max-h-[300px] overflow-y-auto">
+                <div className="space-y-4">
+                  {order.conversation && order.conversation.messages && order.conversation.messages.length > 0 ? (
+                    // 메시지가 있을 경우 표시
+                    order.conversation.messages.map((msg: ChatMessage, idx: number) => (
+                      <div 
+                        key={idx} 
+                        className={`flex ${msg.role === 'user' ? 'justify-end' : msg.role === 'vendor' ? 'justify-start' : 'justify-start'}`}
+                      >
+                        <div 
+                          className={`rounded-lg p-3 max-w-[80%] ${
+                            msg.role === 'user' 
+                              ? 'bg-primary/10 text-foreground' 
+                              : msg.role === 'vendor'
+                                ? 'bg-green-100 text-green-800'
+                                : 'bg-muted'
+                          }`}
+                        >
+                          {msg.role === 'vendor' ? (
+                            <div className="space-y-3">
+                              {/* 판매자 메시지 - 구조화된 형식으로 표시 */}
+                              {msg.productInfo && (
+                                <div className="bg-yellow-50 p-3 rounded-md">
+                                  <div className="font-medium">
+                                    {msg.productInfo.name}
+                                  </div>
+                                  
+                                  {msg.productInfo.imageUrl && (
+                                    <div className="mt-2 rounded-md overflow-hidden">
+                                      <img 
+                                        src={msg.productInfo.imageUrl} 
+                                        alt={msg.productInfo.name || '상품 이미지'} 
+                                        className="w-full max-h-48 object-contain"
+                                      />
+                                    </div>
+                                  )}
+                                  
+                                  <div className="mt-2 text-gray-700 text-sm">
+                                    <div><strong>입찰가격:</strong> {typeof msg.price === 'number' ? 
+                                      `${msg.price.toLocaleString()}원(부가세, 배송비 포함)` : 
+                                      (typeof msg.content === 'string' && msg.content.includes('입찰가격:')) ? 
+                                        (msg.content.match(/입찰가격:\s*([0-9,]+)원/) ?
+                                        msg.content.match(/입찰가격:\s*([0-9,]+)원/)[0] :
+                                        '가격 정보 없음') :
+                                      '가격 정보 없음'
+                                    }</div>
+                                  </div>
+                                </div>
+                              )}
+                              
+                              {/* 판매자 메시지 본문 */}
+                              <div className="whitespace-pre-wrap">
+                                {(() => {
+                                  if (!msg.content) return "";
+                                  
+                                  const content = typeof msg.content === 'string' ? 
+                                    msg.content : 
+                                    typeof msg.content === 'object' && msg.content !== null ?
+                                      'content' in msg.content ? String(msg.content.content) :
+                                      JSON.stringify(msg.content) :
+                                    String(msg.content);
+                                  
+                                  // 입찰가격 부분은 이미 위에 표시했으므로 제외
+                                  const contentWithoutPrice = content.replace(/입찰가격:\s*[0-9,]+원(\(부가세, 배송비 포함\))?/, '');
+                                  // '추천 상품: xxx' 부분도 제외
+                                  const cleanedContent = contentWithoutPrice.replace(/✓\s*추천\s*상품:\s*[^\n]+/, '');
+                                  
+                                  return cleanedContent.replace(/\\n/g, '\n').trim();
+                                })()}
+                              </div>
+                              
+                              {/* 참고 이미지가 있는 경우 표시 */}
+                              {msg.referenceImages && (
+                                Array.isArray(msg.referenceImages) ? 
+                                msg.referenceImages.length > 0 : 
+                                msg.referenceImages
+                              ) && (
+                                <div className="mt-3">
+                                  <div className="font-medium mb-2">참고 이미지</div>
+                                  <div className="grid grid-cols-2 gap-2">
+                                    {(Array.isArray(msg.referenceImages) ? 
+                                      msg.referenceImages : 
+                                      [msg.referenceImages]
+                                    ).map((img, idx) => (
+                                      <div key={idx} className="rounded-md overflow-hidden bg-gray-100">
+                                        <img 
+                                          src={img} 
+                                          alt={`참고 이미지 ${idx + 1}`} 
+                                          className="w-full object-contain max-h-32"
+                                        />
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="text-sm whitespace-pre-wrap">
+                              {(() => {
+                                // console.log("메시지 내용:", msg.content, "타입:", typeof msg.content);
+                                
+                                if (!msg.content) return "내용 없음";
+                                
+                                // 문자열이 아니면 객체나 다른 값인 경우
+                                if (typeof msg.content !== 'string') {
+                                  if (typeof msg.content === 'object' && msg.content !== null) {
+                                    // JSON 객체인 경우 content 속성 추출
+                                    const contentObj = msg.content as Record<string, any>;
+                                    if (contentObj && contentObj.content) {
+                                      return String(contentObj.content).replace(/\\n/g, '\n');
+                                    } else {
+                                      // 그렇지 않으면 전체 객체를 JSON 문자열로 변환
+                                      return JSON.stringify(contentObj).replace(/\\n/g, '\n');
+                                    }
+                                  }
+                                  // 문자열이나 객체가 아닌 경우 문자열로 변환
+                                  return String(msg.content).replace(/\\n/g, '\n');
+                                }
+                                
+                                // 일반 문자열 처리
+                                const content = msg.content;
+                                
+                                try {
+                                  // JSON 형식 문자열 처리
+                                  if (content.startsWith('{') && content.includes('"content":')) {
+                                    const parsed = JSON.parse(content);
+                                    if (parsed.content) {
+                                      return parsed.content.replace(/\\n/g, '\n');
+                                    }
+                                  }
+                                  
+                                  // recommendations 부분 제외
+                                  if (content.includes('"recommendations":')) {
+                                    return content.split('"recommendations":')[0]
+                                      .replace(/{|"content":|"|}|,$/g, '')
+                                      .trim()
+                                      .replace(/\\n/g, '\n');
+                                  }
+                                  
+                                  // 그 외에는 그대로 표시
+                                  return content.replace(/\\n/g, '\n');
+                                } catch (e) {
+                                  // 오류 발생 시 원본 반환
+                                  return content.replace(/\\n/g, '\n');
+                                }
+                              })()}
+                            </div>
+                          )}
+                          </div>
+                          <div className="text-xs text-muted-foreground mt-1 text-right">
+                            {new Date(msg.timestamp).toLocaleTimeString('ko-KR', {hour: '2-digit', minute: '2-digit'})}
+                            {msg.role === 'vendor' && ' (판매자)'}
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    // 메시지가 없을 경우 안내 메시지 표시
+                    <div className="text-center py-8 text-muted-foreground">
+                      <MessageSquare className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                      <p>대화 내역이 없습니다.</p>
+                    </div>
+                  )}
+                  <div ref={chatEndRef} />
+                </div>
+              </CardContent>
+            </Card>
+          )}
+        </div>
+      )}
+      
+      {/* 판매자 선택 상품 */}
+      <div>
+        <h4 className="font-medium mb-2">판매자 상품 선택</h4>
+        <Card>
+          <CardContent className="p-4">
+            <div className="space-y-4">
+              <Select 
+                value={selectedProductId} 
+                onValueChange={handleProductSelected}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="제공할 상품을 선택하세요" />
+                </SelectTrigger>
+                <SelectContent>
+                  {getRelatedProducts().map(product => (
+                    <SelectItem 
+                      key={product.id} 
+                      value={product.id}
+                    >
+                      {product.name} ({product.price.toLocaleString()}원)
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              
+              {selectedProductId && (
+                <div className="bg-muted p-3 rounded">
+                  {(() => {
+                    // 문자열 타입의 selectedProductId를 숫자 또는 문자열로 비교할 수 있도록 변환
+                    console.log("선택한 제품 ID:", selectedProductId, "타입:", typeof selectedProductId);
+                    console.log("사용 가능한 제품들:", products.map(p => ({ id: p.id, name: p.name, type: typeof p.id })));
+                    
+                    // 타입에 관계없이 제품 ID 비교
+                    const selected = products.find(p => 
+                      String(p.id) === String(selectedProductId)
+                    );
+                    
+                    console.log("찾은 제품:", selected);
+                    return selected ? (
+                      <div className="flex items-start gap-3">
+                        {selected.imageUrl ? (
+                          <div className="h-16 w-16 rounded-md overflow-hidden flex-shrink-0">
+                            <img 
+                              src={selected.imageUrl} 
+                              alt={selected.name} 
+                              className="h-full w-full object-cover" 
+                            />
+                          </div>
+                        ) : (
+                          <div className="h-16 w-16 rounded-md bg-background flex items-center justify-center flex-shrink-0">
+                            <Package className="h-8 w-8 text-muted-foreground" />
+                          </div>
+                        )}
+                        
+                        <div className="flex-1">
+                          <div className="font-medium">{selected.name}</div>
+                          <div className="text-sm text-muted-foreground mt-1">
+                            {selected.description}
+                          </div>
+                          <div className="flex justify-between mt-2">
+                            <span className="text-sm">기본 가격:</span>
+                            <span className="font-medium">{selected.price.toLocaleString()}원</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-sm">재고:</span>
+                            <span>{selected.stock}개</span>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">선택된 상품 정보를 불러올 수 없습니다.</p>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+      
+      {/* 입찰 금액 */}
+      <div>
+        <h4 className="font-medium mb-2">입찰 금액</h4>
+        <Card>
+          <CardContent className="p-4">
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  value={bidAmount}
+                  onChange={e => setBidAmount(e.target.value)}
+                  placeholder="가격을 입력하세요"
+                  className="flex-1"
+                />
+                <div className="text-sm font-medium">원</div>
+              </div>
+              
+              <div className="text-sm text-muted-foreground">
+                * 최종 가격은 부가세 포함이며, 배송비는 별도입니다.
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+      
+      {/* 판매자 메시지 입력 */}
+      <div>
+        <h4 className="font-medium mb-2">판매자 메시지</h4>
+        <Card>
+          <CardContent className="p-4">
+            <Textarea
+              placeholder="고객에게 전달할 메시지를 입력하세요"
+              value={vendorMessage}
+              onChange={e => setVendorMessage(e.target.value)}
+              rows={3}
+            />
+          </CardContent>
+        </Card>
+      </div>
+      
+      {/* 참고 이미지 */}
+      <div>
+        <div className="flex justify-between items-center mb-2">
+          <h4 className="font-medium">참고 이미지 (최대 5장)</h4>
+          <Button 
+            size="sm" 
+            onClick={() => setImageUploadOpen(true)} 
+            variant="outline"
+            disabled={referenceImages.length >= 5}
+          >
+            <ImagePlus className="h-4 w-4 mr-2" />
+            {referenceImages.length >= 5 ? '최대 개수 도달' : '이미지 추가'}
+          </Button>
+        </div>
+        
+        <Card>
+          <CardContent className="p-4">
+            {referenceImages.length > 0 ? (
+              <div className="grid grid-cols-2 gap-3">
+                {referenceImages.map((img, index) => (
+                  <div key={index} className="relative group">
+                    <div className="rounded-md overflow-hidden bg-muted" style={{ minHeight: "150px" }}>
+                      <img 
+                        src={img} 
+                        alt={`참고 이미지 ${index + 1}`} 
+                        className="w-full object-contain max-h-[250px]" 
+                        style={{ margin: "0 auto", display: "block" }}
+                      />
+                    </div>
+                    <Button
+                      variant="destructive"
+                      size="icon"
+                      className="h-6 w-6 absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity"
+                      onClick={() => handleRemoveReferenceImage(index)}
+                    >
+                      <Trash className="h-3 w-3" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-8 text-muted-foreground">
+                <ImagePlus className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                <p>참고 이미지가 없습니다.</p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+      
+      {/* 입찰하기 버튼 (pending 또는 preparing 상태인 경우에만 표시) */}
+      {(order.status === 'pending' || order.status === 'preparing' || order.status === 'reviewing') && (
+        <Button 
+          className="w-full" 
+          size="lg"
+          onClick={handleConfirmBid}
+        >
+          입찰하기
+        </Button>
+      )}
+      
+      {/* 이미지 파일 업로드 다이얼로그 */}
+      <Dialog open={imageUploadOpen} onOpenChange={setImageUploadOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>이미지 파일 업로드</DialogTitle>
+            <DialogDescription>
+              참고용 이미지 파일을 업로드하세요. (최대 5MB)
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid w-full max-w-sm items-center gap-1.5">
+              <Input 
+                id="imageFile" 
+                type="file"
+                accept="image/*"
+                multiple
+                className="mt-2" 
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                파일 여러 개를 한 번에 선택할 수 있습니다. (최대 5개)
+              </p>
+              {uploadProgress > 0 && uploadProgress < 100 && (
+                <Progress value={uploadProgress} className="w-full h-2 mt-2" />
+              )}
+            </div>
+            <div className="mt-4 flex justify-end space-x-2">
+              <Button variant="secondary" onClick={() => setImageUploadOpen(false)}>
+                취소
+              </Button>
+              <Button 
+                onClick={handleUploadImage}
+                disabled={isUploading}
+              >
+                {isUploading ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    업로드 중...
+                  </>
+                ) : '업로드'}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+// 제품 추가/수정 다이얼로그 컴포넌트
+interface ProductDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSave: (product: Partial<Product>) => void;
+  product?: Product;
+}
+
+export default function VendorDashboard() {
+  const { user, logoutMutation } = useAuth();
+  const [, navigate] = useLocation();
+  const { toast } = useToast();
+  
+  // 인증 확인
+  useEffect(() => {
+    // 사용자가 없으면 로그인 페이지로 리다이렉트
+    if (!user) {
+      navigate('/auth');
+    }
+  }, [user, navigate]);
+  
+  // 상태 관리
+  const [bids, setBids] = useState<BidData[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
+  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [productDialogOpen, setProductDialogOpen] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [activeTab, setActiveTab] = useState("orders");
+  const [loading, setLoading] = useState(true);
+  const [conversations, setConversations] = useState<Record<number, any>>({});
+  
+  // 로그아웃 처리
+  const handleLogout = () => {
+    logoutMutation.mutate(undefined, {
+      onSuccess: () => {
+        navigate('/auth');
+      },
+      onError: (error) => {
+        console.error("로그아웃 오류:", error);
+        toast({
+          title: "로그아웃 실패",
+          description: "로그아웃 중 오류가 발생했습니다. 다시 시도해주세요.",
+          variant: "destructive"
+        });
+      }
+    });
+  };
+  
+  // 데이터 로드
+  useEffect(() => {
+    // 사용자 인증 상태 확인
+    if (!user) {
+      console.log("로그인되지 않은 상태 - 데이터 로딩 건너뜀");
+      setLoading(false);
+      return;
+    }
+    
+    setLoading(true);
+    console.log("판매자 대시보드: 데이터 로딩 시작 (userId:", user.id, ")");
+    
+    // 안전한 데이터 페칭 함수
+    const fetchWithAuth = async (url: string) => {
+      try {
+        const response = await fetch(url, {
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          // 캐시를 방지하기 위한 타임스탬프 추가
+          cache: 'no-store'
+        });
+        
+        if (!response.ok) {
+          if (response.status === 401) {
+            console.warn(`인증 오류: ${url}`);
+            return null;
+          }
+          throw new Error(`API 오류 (${response.status}): ${url}`);
+        }
+        
+        return await response.json();
+      } catch (error) {
+        console.error(`데이터 가져오기 오류 (${url}):`, error);
+        return null;
+      }
+    };
+    
+    // 비동기 데이터 로딩
+    const loadData = async () => {
+      try {
+        // 필수 데이터 병렬로 로드
+        console.log("판매자 입찰 데이터 요청 중...");
+        const [bidsData, productsData] = await Promise.all([
+          fetchWithAuth('/api/bids/vendor'),
+          fetchWithAuth('/api/products')
+        ]);
+        
+        // 데이터 검증
+        if (!bidsData || !Array.isArray(bidsData)) {
+          console.warn("유효하지 않은 입찰 데이터 - 빈 배열 사용");
+          setBids([]);
+        } else {
+          console.log(`판매자 입찰 데이터 (${bidsData.length}개):`, bidsData);
+          setBids(bidsData);
+          
+          // 대화 내역 ID가 있는 모든 입찰에 대한 고유 대화 ID 수집
+          const conversationIds = bidsData
+            .filter(bid => bid && bid.conversationId)
+            .map(bid => bid.conversationId);
+            
+          // 중복 제거 및 null, undefined 값 제거
+          const uniqueConversationIds = Array.from(new Set(conversationIds))
+            .filter(id => id !== null && id !== undefined) as number[];
+          
+          console.log(`고유 대화 ID 목록 (${uniqueConversationIds.length}개):`, uniqueConversationIds);
+          
+          // 대화 데이터 로드
+          if (uniqueConversationIds.length > 0) {
+            try {
+              // 각 대화 정보 가져오기
+              const conversationsPromises = uniqueConversationIds.map(convId => 
+                fetchWithAuth(`/api/conversations/${convId}`)
+              );
+              
+              const conversationsData = await Promise.all(conversationsPromises);
+              
+              // 각 대화 ID와 입찰 ID 매핑 생성
+              const convIdToBidIds: Record<number, number[]> = {};
+              
+              // 대화 ID별로 연결된 입찰 ID 매핑
+              bidsData.forEach(bid => {
+                if (bid.conversationId) {
+                  if (!convIdToBidIds[bid.conversationId]) {
+                    convIdToBidIds[bid.conversationId] = [];
+                  }
+                  convIdToBidIds[bid.conversationId].push(bid.id);
+                }
+              });
+              
+              console.log("대화 ID와 입찰 ID 매핑:", convIdToBidIds);
+                
+              // 대화 데이터를 ID를 키로 하는 객체로 변환
+              const conversationMap: Record<number, any> = {};
+              let validConversations = 0;
+              
+              conversationsData.forEach((conversation, index) => {
+                if (conversation) {
+                  const convId = uniqueConversationIds[index];
+                  if (convId) {
+                    validConversations++;
+                    
+                    // JSON 문자열로 된 메시지를 객체로 파싱
+                    if (conversation.messages && typeof conversation.messages === 'string') {
+                      try {
+                        conversation.messages = JSON.parse(conversation.messages);
+                      } catch (e) {
+                        console.warn(`대화 메시지 파싱 오류 (ID: ${convId}):`, e);
+                        conversation.messages = [];
+                      }
+                    }
+                    
+                    // 이 대화와 연결된 입찰 ID 저장
+                    conversation.linkedBidIds = convIdToBidIds[convId] || [];
+                    console.log(`대화 ID ${convId}에 연결된 입찰 ID:`, conversation.linkedBidIds);
+                    
+                    // 대화 맵에 추가
+                    conversationMap[convId] = conversation;
+                  }
+                }
+              });
+              
+              console.log(`가져온 대화 데이터 (${validConversations}개 성공):`, conversationMap);
+              setConversations(conversationMap);
+            } catch (convError) {
+              console.error("대화 데이터 로딩 오류:", convError);
+            }
+          }
+        }
+        
+        // 제품 데이터 처리
+        if (!productsData || !Array.isArray(productsData)) {
+          console.warn("유효하지 않은 제품 데이터");
+          setProducts([]);
+        } else {
+          console.log(`제품 데이터 (${productsData.length}개):`, productsData);
+          setProducts(productsData);
+        }
+      } catch (error) {
+        console.error("데이터 로딩 오류:", error);
+        toast({
+          title: "데이터 로딩 실패",
+          description: "데이터를 불러오는 중 오류가 발생했습니다. 새로고침을 시도해주세요.",
+          variant: "destructive"
+        });
+      } finally {
+        setLoading(false);
+        console.log("판매자 대시보드: 데이터 로딩 완료");
+      }
+    };
+    
+    loadData();
+    
+    // 주기적으로 입찰 데이터 새로고침 (10분마다)
+    const refreshInterval = setInterval(() => {
+      console.log("자동 데이터 새로고침 실행");
+      loadData();
+    }, 10 * 60 * 1000);
+    
+    // 컴포넌트 언마운트 시 인터벌 정리
+    return () => {
+      clearInterval(refreshInterval);
+    };
+  }, [user, toast]);
+  
+  // 주문 상태 업데이트
+  const handleUpdateOrderStatus = (orderId: string, newStatus: OrderStatus) => {
+    // BID-123 형식에서 순수 ID만 추출
+    const bidId = parseInt(orderId.replace('BID-', ''));
+    
+    // API 호출
+    fetch(`/api/bids/${bidId}/status`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ status: newStatus }),
+    })
+      .then(res => {
+        if (!res.ok) {
+          throw new Error('상태 업데이트에 실패했습니다');
+        }
+        return res.json();
+      })
+      .then(data => {
+        // 상태가 성공적으로 업데이트되면 로컬 상태도 업데이트
+        const updatedBids = bids.map(bid => 
+          bid.id === bidId ? { ...bid, status: newStatus } : bid
+        );
+        setBids(updatedBids);
+        
+        // 선택된 주문이 있고 해당 주문이 업데이트된 경우 주문 상태도 업데이트
+        if (selectedOrder && selectedOrder.id === orderId) {
+          setSelectedOrder({
+            ...selectedOrder,
+            status: newStatus
+          });
+        }
+        
+        toast({
+          title: "상태 업데이트 성공",
+          description: "주문 상태가 성공적으로 업데이트되었습니다.",
+        });
+      })
+      .catch(err => {
+        console.error('상태 업데이트 오류:', err);
+        toast({
+          title: "상태 업데이트 실패",
+          description: err.message,
+          variant: "destructive"
+        });
+      });
+  };
+  
+  // 입찰 정보 업데이트
+  const handleUpdateBid = (orderId: string, bidData: Partial<BidData>) => {
+    // BID-123 형식에서 순수 ID만 추출
+    const bidId = parseInt(orderId.replace('BID-', ''));
+    
+    // API 호출
+    fetch(`/api/bids/${bidId}`, {
+      method: 'PATCH',  // PUT 대신 PATCH 사용
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(bidData),
+    })
+      .then(res => {
+        if (!res.ok) {
+          throw new Error('입찰 정보 업데이트에 실패했습니다');
+        }
+        return res.json();
+      })
+      .then(data => {
+        // 입찰 정보가 성공적으로 업데이트되면 로컬 상태도 업데이트
+        const updatedBids = bids.map(bid => 
+          bid.id === bidId ? { ...bid, ...bidData } : bid
+        );
+        setBids(updatedBids);
+        
+        // 선택된 주문이 있고 해당 주문이 업데이트된 경우 주문 정보도 업데이트
+        if (selectedOrder && selectedOrder.id === orderId) {
+          setSelectedOrder({
+            ...selectedOrder,
+            bidAmount: typeof bidData.price === 'number' ? bidData.price : selectedOrder.bidAmount,
+            vendorMessage: bidData.vendorMessage || selectedOrder.vendorMessage,
+            referenceImages: bidData.referenceImages || selectedOrder.referenceImages,
+            selectedProductId: bidData.selectedProductId || selectedOrder.selectedProductId,
+            status: (bidData.status as OrderStatus) || selectedOrder.status
+          });
+        }
+        
+        toast({
+          title: "입찰 정보 업데이트 성공",
+          description: "입찰 정보가 성공적으로 업데이트되었습니다.",
+        });
+      })
+      .catch(err => {
+        console.error('입찰 데이터 업데이트 오류:', err);
+        toast({
+          title: "입찰 정보 업데이트 실패",
+          description: err.message,
+          variant: "destructive"
+        });
+      });
+  };
+
+  // 권한 확인 (판매자만 이 페이지에 접근 가능)
+  if (!user) return <Redirect to="/auth" />;
+  if (user.role !== 'vendor') return <Redirect to="/" />;
+  
+  // 제품 수정 함수
+  const handleEditProduct = (product: Product) => {
+    // 편집하기 전에 로그 기록
+    console.log("[VendorDashboard] 제품 수정 시작:", product.id);
+    setEditingProduct(product);
+    setProductDialogOpen(true);
+  };
+  
+  // 제품 삭제 함수
+  const handleDeleteProduct = (productId: string) => {
+    if (window.confirm('정말로 이 제품을 삭제하시겠습니까?')) {
+      fetch(`/api/products/${productId}`, {
+        method: 'DELETE',
+      })
+        .then(res => {
+          if (!res.ok) {
+            throw new Error('제품 삭제에 실패했습니다');
+          }
+          return res.json();
+        })
+        .then(() => {
+          const updatedProducts = products.filter(p => p.id !== productId);
+          setProducts(updatedProducts);
+          toast({
+            title: "제품 삭제됨",
+            description: "제품이 성공적으로 삭제되었습니다."
+          });
+        })
+        .catch(err => {
+          console.error('제품 삭제 오류:', err);
+          toast({
+            title: "제품 삭제 실패",
+            description: err.message,
+            variant: "destructive"
+          });
+        });
+    }
+  };
+  
+  // 제품 저장 함수
+  const handleSaveProduct = (product: Partial<Product>) => {
+    // 이미지 URL 확인 로깅
+    console.log("제품 저장 전 최종 데이터:", product);
+    console.log("handleSaveProduct 호출됨! 편집 중인 제품:", editingProduct?.id);
+    
+    // 새 제품 추가 또는 기존 제품 수정
+    const method = editingProduct ? 'PUT' : 'POST';
+    const url = editingProduct 
+      ? `/api/products/${editingProduct.id}` 
+      : '/api/products';
+    
+    fetch(url, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(product),
+    })
+      .then(res => {
+        if (!res.ok) {
+          throw new Error('제품 저장에 실패했습니다');
+        }
+        return res.json();
+      })
+      .then(data => {
+        console.log("서버 응답 데이터:", data);
+        
+        if (editingProduct) {
+          const updatedProducts = products.map(p => 
+            p.id === editingProduct.id ? { ...p, ...data } : p
+          );
+          setProducts(updatedProducts);
+          toast({
+            title: "제품 수정됨",
+            description: "제품 정보가 성공적으로 수정되었습니다."
+          });
+        } else {
+          setProducts([...products, data]);
+          toast({
+            title: "새 제품 등록됨",
+            description: "새 제품이 성공적으로 등록되었습니다."
+          });
+        }
+        setProductDialogOpen(false);
+        setEditingProduct(null);
+      })
+      .catch(err => {
+        console.error('제품 저장 오류:', err);
+        toast({
+          title: "제품 저장 실패",
+          description: err.message,
+          variant: "destructive"
+        });
+      });
+  };
+  
+  // 실제 입찰 데이터를 주문 형식으로 변환
+  const convertBidsToOrders = () => {
+    // 입찰 데이터가 없거나 비어있는 경우 빈 배열 반환
+    if (!bids || bids.length === 0) {
+      console.log("입찰 데이터가 없습니다.");
+      return [];
+    }
+    
+    console.log("입찰 데이터를 주문으로 변환 - 총", bids.length, "개");
+    
+    return bids.map((bid: any): Order => {
+      // 로그 추가
+      console.log("입찰 항목 변환 중:", bid.id, "상태:", bid.status);
+      
+      const bidAmount = typeof bid.price === 'string' ? parseFloat(bid.price) : bid.price;
+      
+      // 참조 이미지 확인
+      const referenceImages = bid.referenceImages 
+        ? (Array.isArray(bid.referenceImages) 
+          ? bid.referenceImages 
+          : (typeof bid.referenceImages === 'string' 
+            ? JSON.parse(bid.referenceImages) 
+            : []))
+        : [];
+      
+      console.log("참조 이미지:", referenceImages);
+      
+      // 대화 내역 데이터 준비
+      let conversationId = bid.conversationId;
+      let conversationMessages: ChatMessage[] = [];
+      
+      // 기본 AI 대화 메시지 (실제 대화 내역이 없을 경우 표시)
+      const defaultMessages: ChatMessage[] = [
+        {
+          role: 'user', 
+          content: '아직 대화 내역을 불러올 수 없습니다. 이 입찰 항목에는 연결된 대화 기록이 없습니다.',
+          timestamp: new Date()
+        }
+      ];
+      
+      // 대화 내역이 있으면 찾아서 사용, 없으면 기본 메시지 사용
+      if (conversationId && conversations[conversationId]) {
+        const conv = conversations[conversationId];
+        
+        // 이 대화가 현재 입찰에 연결된 것인지 확인
+        if (!conv.linkedBidIds || !conv.linkedBidIds.includes(bid.id)) {
+          console.log(`대화 ID ${conversationId}는 이 입찰(${bid.id})에 연결되지 않았거나 잘못된 링크입니다`);
+          conversationMessages = defaultMessages;
+        } else {
+          console.log(`대화 ID ${conversationId}는 입찰 ID ${bid.id}에 올바르게 연결됨`);
+          
+          if (conv && conv.messages && Array.isArray(conv.messages)) {
+            try {
+              // DB에서 가져온 JSON 문자열 파싱 처리
+              const parsedMessages = typeof conv.messages === 'string' 
+                ? JSON.parse(conv.messages) 
+                : conv.messages;
+                
+              // 메시지 구조 검증 및 타입 변환
+              conversationMessages = parsedMessages.map((msg: any) => {
+                // 타입 정의 
+                const convertedMsg: ChatMessage = {
+                  role: msg.role as 'user' | 'assistant' | 'vendor',
+                  content: '',
+                  timestamp: new Date(msg.timestamp)
+                };
+                
+                // content 처리 - 문자열, 객체, 또는 JSON 문자열이 올 수 있음
+                if (msg.content) {
+                  if (typeof msg.content === 'string') {
+                    // 문자열인 경우 그대로 사용
+                    convertedMsg.content = msg.content;
+                  } else if (typeof msg.content === 'object') {
+                    // 객체인 경우 직렬화된 형태로 변환
+                    // 객체에 content 속성이 있으면 해당 값 사용
+                    const contentObj = msg.content as Record<string, any>;
+                    if (contentObj && contentObj.content) {
+                      convertedMsg.content = String(contentObj.content);
+                    } else {
+                      // 그렇지 않으면 전체 객체를 JSON 문자열로 변환
+                      convertedMsg.content = JSON.stringify(contentObj);
+                    }
+                  } else {
+                    // 그 외 타입은 문자열로 변환
+                    convertedMsg.content = String(msg.content);
+                  }
+                } else {
+                  convertedMsg.content = "내용 없음";
+                }
+                
+                // 추가 속성들
+                if (msg.recommendations) convertedMsg.recommendations = msg.recommendations;
+                if (msg.imageUrl) convertedMsg.imageUrl = msg.imageUrl;
+                if (msg.productInfo) convertedMsg.productInfo = msg.productInfo;
+                
+                return convertedMsg;
+              });
+              
+              console.log(`대화 ${conversationId}에서 입찰 ${bid.id}에 대한`, conversationMessages.length, "개의 메시지를 변환");
+            } catch (error) {
+              console.error(`입찰 ID ${bid.id}의 대화 메시지 파싱 오류:`, error);
+              // 오류 발생 시 기본 메시지 사용
+              conversationMessages = defaultMessages;
+            }
+          } else {
+            console.log(`입찰 ID ${bid.id}에 대한 메시지 배열이 없거나 유효하지 않음`);
+            conversationMessages = defaultMessages;
+          }
+        }
+      } else {
+        // 대화 ID가 없거나 대화를 찾을 수 없는 경우 기본 메시지 사용
+        console.log(`입찰 ID ${bid.id}의 대화 ID(${conversationId})가 없거나 매핑된 대화가 없음`);
+        conversationMessages = defaultMessages;
+      }
+      
+      return {
+        id: `BID-${bid.id}`,
+        bidId: bid.id,
+        customer: {
+          name: bid.customer?.name || '알 수 없는 사용자',
+          userId: bid.userId,
+          phone: bid.customer?.phone || '정보 없음',
+          address: bid.customer?.address || '정보 없음'
+        },
+        type: bid.additionalServices?.includes('AI') ? 'ai' : 'direct',
+        status: bid.status as OrderStatus,
+        date: new Date(bid.createdAt),
+        bidAmount: bidAmount,
+        vendorMessage: bid.vendorMessage,
+        referenceImages: referenceImages,
+        selectedProductId: bid.selectedProductId,
+        plant: bid.plant,
+        conversation: {
+          id: conversationId || 1,
+          messages: conversationMessages
+        }
+      };
+    });
+  };
+  
+  // 알림 목록을 입찰 데이터에서 생성
+  const generateNotifications = (): Notification[] => {
+    // 모든 입찰 중 읽지 않은 '대기 중' 상태의 입찰을 알림으로 변환
+    return bids
+      .filter(bid => bid.status === 'pending')
+      .map(bid => ({
+        id: `BN-${bid.id}`,
+        type: 'order',
+        title: '새로운 입찰 요청이 있습니다',
+        description: `${bid.customer?.name || '고객'}님이 ${bid.plant?.name || '식물'} 구매를 문의했습니다.`,
+        isRead: false,
+        date: new Date(bid.createdAt)
+      }));
+  };
+
+  // 필터링된 주문 목록
+  const filteredOrders = convertBidsToOrders().filter(order => 
+    (order.customer.name && order.customer.name.toLowerCase().includes(searchTerm.toLowerCase())) ||
+    order.id.includes(searchTerm)
+  );
+  
+  return (
+    <div className="min-h-screen bg-background">
+      {/* 헤더 */}
+      <header className="border-b bg-card">
+        <div className="container mx-auto px-4 sm:px-6 py-4 flex justify-between items-center">
+          <div className="flex items-center space-x-4">
+            <Store className="h-6 w-6" />
+            <h1 className="text-xl font-bold">판매자 대시보드</h1>
+          </div>
+          
+          <div className="flex items-center space-x-2">
+            <Button size="sm" variant="ghost">
+              <Bell className="h-5 w-5" />
+              <span className="ml-1">{generateNotifications().filter(n => !n.isRead).length}</span>
+            </Button>
+            <Button size="sm" variant="ghost" onClick={handleLogout}>
+              <LogOut className="h-5 w-5" />
+              <span className="ml-1 hidden sm:inline">로그아웃</span>
+            </Button>
+            <div className="text-sm font-medium">{user.username}</div>
+          </div>
+        </div>
+      </header>
+      
+      {/* 메인 콘텐츠 */}
+      <div className="container mx-auto px-4 sm:px-6 py-6">
+        <Tabs value={activeTab} onValueChange={setActiveTab}>
+          <div className="flex justify-between items-center mb-6">
+            <TabsList>
+              <TabsTrigger value="orders" className="flex items-center">
+                <ShoppingBag className="mr-2 h-4 w-4" />
+                주문 관리
+              </TabsTrigger>
+              <TabsTrigger value="products" className="flex items-center">
+                <Package className="mr-2 h-4 w-4" />
+                제품 관리
+              </TabsTrigger>
+              <TabsTrigger value="location" className="flex items-center">
+                <MapPin className="mr-2 h-4 w-4" />
+                매장 위치
+              </TabsTrigger>
+              <TabsTrigger value="notifications" className="flex items-center">
+                <Bell className="mr-2 h-4 w-4" />
+                알림
+              </TabsTrigger>
+            </TabsList>
+            
+            {activeTab === "products" && (
+              <Button onClick={() => {
+                // 새 제품 등록시 반드시 편집중인 제품 정보 초기화
+                setEditingProduct(null);
+                setProductDialogOpen(true);
+              }}>
+                <PlusCircle className="mr-2 h-4 w-4" />
+                새 제품 등록
+              </Button>
+            )}
+          </div>
+          
+          {/* 주문 관리 탭 */}
+          <TabsContent value="orders" className="mt-6">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-1">
+                <div className="mb-4 flex space-x-2">
+                  <div className="relative flex-1">
+                    <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                    <Input
+                      placeholder="주문 검색..."
+                      className="pl-9"
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                    />
+                  </div>
+                  <Button variant="outline" size="icon">
+                    <Filter className="h-4 w-4" />
+                  </Button>
+                </div>
+                
+                <Card>
+                  <CardHeader className="py-3">
+                    <CardTitle className="text-lg">주문 목록</CardTitle>
+                  </CardHeader>
+                  <ScrollArea className="h-[65vh]">
+                    <CardContent className="p-0">
+                      <div className="divide-y">
+                        {filteredOrders.map((order) => (
+                          <div 
+                            key={order.id}
+                            className={`p-4 cursor-pointer hover:bg-muted/50 ${selectedOrder?.id === order.id ? 'bg-muted' : ''}`}
+                            onClick={() => setSelectedOrder(order)}
+                          >
+                            <div className="flex justify-between items-start mb-2">
+                              <div className="font-medium">
+                                {order.customer.name}
+                                <span className="ml-2 text-xs text-muted-foreground">#{order.id}</span>
+                              </div>
+                              <OrderStatusBadge status={order.status} />
+                            </div>
+                            
+                            <div className="text-sm text-muted-foreground mb-2">
+                              {order.date.toLocaleDateString('ko-KR')}
+                              <span className="mx-2">•</span>
+                              {order.type === 'ai' ? 'AI 컨설팅' : '직접 주문'}
+                            </div>
+                            
+                            <div className="flex justify-between items-center">
+                              <div className="text-sm">
+                                {order.plant?.name 
+                                  ? `식물: ${order.plant.name}` 
+                                  : order.type === 'ai' && order.conversation?.recommendations
+                                    ? `추천 식물: ${order.conversation.recommendations.map(r => r.name).join(', ')}`
+                                    : order.type === 'direct' && order.items
+                                      ? `${order.items.length}개 상품`
+                                      : '내용 없음'
+                                }
+                              </div>
+                              <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                            </div>
+                          </div>
+                        ))}
+                        
+                        {filteredOrders.length === 0 && (
+                          <div className="p-8 text-center text-muted-foreground">
+                            주문이 없습니다.
+                          </div>
+                        )}
+                      </div>
+                    </CardContent>
+                  </ScrollArea>
+                </Card>
+              </div>
+              
+              <div className="lg:col-span-2">
+                {selectedOrder ? (
+                  <Card>
+                    <CardHeader className="py-3">
+                      <CardTitle className="text-lg">주문 상세</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <OrderDetails 
+                        order={selectedOrder} 
+                        onUpdateStatus={handleUpdateOrderStatus}
+                        onUpdateBid={handleUpdateBid}
+                        products={products}
+                      />
+                    </CardContent>
+                  </Card>
+                ) : (
+                  <div className="flex h-full items-center justify-center bg-muted/30 rounded-lg p-8">
+                    <div className="text-center">
+                      <MessageSquare className="mx-auto h-12 w-12 text-muted-foreground opacity-50" />
+                      <h3 className="mt-4 text-lg font-medium">주문을 선택하세요</h3>
+                      <p className="mt-2 text-sm text-muted-foreground">
+                        왼쪽 목록에서 주문을 선택하면 상세 정보가 여기에 표시됩니다.
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </TabsContent>
+          
+          {/* 제품 관리 탭 */}
+          <TabsContent value="products" className="mt-6">
+            {loading ? (
+              <div className="flex justify-center items-center p-12">
+                <div className="text-center">
+                  <div className="flex items-center justify-center space-x-2">
+                    <div className="w-4 h-4 rounded-full animate-pulse bg-primary"></div>
+                    <div className="w-4 h-4 rounded-full animate-pulse bg-primary"></div>
+                    <div className="w-4 h-4 rounded-full animate-pulse bg-primary"></div>
+                  </div>
+                  <p className="mt-4 text-sm text-muted-foreground">제품 정보를 불러오는 중...</p>
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {products.map((product) => (
+                  <Card key={product.id}>
+                    <div className="aspect-square w-full bg-white flex items-center justify-center">
+                      {product.imageUrl ? (
+                        <img 
+                          src={product.imageUrl} 
+                          alt={product.name} 
+                          className="w-full h-full object-contain"
+                          onError={(e) => {
+                            console.error("이미지 로드 오류:", product.imageUrl);
+                            e.currentTarget.onerror = null;
+                            
+                            // 에러 발생 시 이미지 대신 에러 메시지 표시
+                            const parent = e.currentTarget.parentElement;
+                            if (parent) {
+                              parent.innerHTML = `
+                                <div class="flex items-center justify-center h-full w-full">
+                                  <span class="text-muted-foreground text-sm">이미지 로드 실패</span>
+                                </div>
+                              `;
+                            }
+                          }}
+                        />
+                      ) : (
+                        <Package className="h-10 w-10 text-muted-foreground" />
+                      )}
+                    </div>
+                    <CardHeader className="p-4">
+                      <CardTitle className="text-lg">{product.name}</CardTitle>
+                      <CardDescription className="line-clamp-2">
+                        {product.description}
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="p-4 pt-0 text-sm">
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <div className="text-muted-foreground">가격</div>
+                          <div className="font-medium">{product.price.toLocaleString()}원</div>
+                        </div>
+                        <div>
+                          <div className="text-muted-foreground">재고</div>
+                          <div className="font-medium">{product.stock}개</div>
+                        </div>
+                        <div>
+                          <div className="text-muted-foreground">카테고리</div>
+                          <div className="font-medium">{product.category || "미분류"}</div>
+                        </div>
+                      </div>
+                    </CardContent>
+                    <CardFooter className="p-4 pt-0 flex justify-between">
+                      <Button 
+                        variant="outline" 
+                        size="sm"
+                        onClick={() => handleEditProduct(product)}
+                      >
+                        <Edit className="mr-2 h-4 w-4" />
+                        수정
+                      </Button>
+                      <Button 
+                        variant="destructive" 
+                        size="sm"
+                        onClick={() => handleDeleteProduct(product.id)}
+                      >
+                        <Trash className="mr-2 h-4 w-4" />
+                        삭제
+                      </Button>
+                    </CardFooter>
+                  </Card>
+                ))}
+                
+                {products.length === 0 && (
+                  <div className="col-span-full">
+                    <Card className="text-center p-12">
+                      <Package className="mx-auto h-12 w-12 text-muted-foreground opacity-50 mb-4" />
+                      <CardTitle className="mb-2">등록된 제품이 없습니다</CardTitle>
+                      <CardDescription>
+                        오른쪽 상단의 '새 제품 등록' 버튼을 클릭하여 제품을 추가하세요.
+                      </CardDescription>
+                      <Button
+                        className="mt-6"
+                        onClick={() => {
+                          // 여기서도 편집중인 제품 정보 초기화
+                          setEditingProduct(null);
+                          setProductDialogOpen(true);
+                        }}
+                      >
+                        <PlusCircle className="mr-2 h-4 w-4" />
+                        제품 추가하기
+                      </Button>
+                    </Card>
+                  </div>
+                )}
+              </div>
+            )}
+          </TabsContent>
+          
+          {/* 매장 위치 탭 */}
+          <TabsContent value="location" className="mt-6">
+            <Card>
+              <CardHeader>
+                <CardTitle>내 매장 위치 설정</CardTitle>
+                <CardDescription>
+                  지도에서 매장 위치를 설정하고 검색 반경을 지정하세요. 고객이 이 반경 내에서 검색할 때 노출됩니다.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <LocationSettings />
+              </CardContent>
+            </Card>
+          </TabsContent>
+          
+          {/* 알림 탭 */}
+          <TabsContent value="notifications" className="mt-6">
+            <Card>
+              <CardHeader>
+                <CardTitle>알림</CardTitle>
+                <CardDescription>
+                  주문 및 메시지와 관련된 모든 알림을 확인하세요.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ScrollArea className="h-[70vh]">
+                  <div className="space-y-4">
+                    {generateNotifications().length > 0 ? (
+                      generateNotifications().map(notification => (
+                        <Card key={notification.id} className="relative">
+                          {!notification.isRead && (
+                            <div className="absolute w-3 h-3 bg-primary rounded-full right-4 top-4" />
+                          )}
+                          <CardContent className="p-4">
+                            <div className="flex items-start gap-4">
+                              <div className={`rounded-full p-2 ${
+                                notification.type === 'order' 
+                                  ? 'bg-blue-100 text-blue-700' 
+                                  : notification.type === 'message'
+                                    ? 'bg-green-100 text-green-700'
+                                    : 'bg-yellow-100 text-yellow-700'
+                              }`}>
+                                {notification.type === 'order' ? (
+                                  <ShoppingBag className="h-5 w-5" />
+                                ) : notification.type === 'message' ? (
+                                  <MessageCircle className="h-5 w-5" />
+                                ) : (
+                                  <AlertCircle className="h-5 w-5" />
+                                )}
+                              </div>
+                              <div className="flex-1">
+                                <div className="font-medium">{notification.title}</div>
+                                <div className="text-sm text-muted-foreground mt-1">
+                                  {notification.description}
+                                </div>
+                                <div className="text-xs text-muted-foreground mt-2">
+                                  {notification.date.toLocaleDateString('ko-KR', {
+                                    year: 'numeric',
+                                    month: 'long',
+                                    day: 'numeric',
+                                    hour: '2-digit',
+                                    minute: '2-digit'
+                                  })}
+                                </div>
+                              </div>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      ))
+                    ) : (
+                      <div className="text-center py-12">
+                        <Bell className="h-12 w-12 mx-auto text-muted-foreground opacity-40 mb-4" />
+                        <h3 className="text-lg font-medium mb-2">알림이 없습니다</h3>
+                        <p className="text-sm text-muted-foreground">
+                          새로운 주문이나 메시지가 도착하면 여기에 표시됩니다.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </ScrollArea>
+              </CardContent>
+            </Card>
+          </TabsContent>
+        </Tabs>
+      </div>
+      
+      {/* 제품 추가/수정 다이얼로그 */}
+      <ProductDialog
+        open={productDialogOpen}
+        onOpenChange={setProductDialogOpen}
+        onSave={handleSaveProduct}
+        product={editingProduct || undefined}
+      />
+    </div>
+  );
+}

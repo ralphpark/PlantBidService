@@ -1,0 +1,1580 @@
+import { useState, useEffect, useRef } from "react";
+import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/hooks/use-auth";
+import { useKoreanTime } from "@/lib/use-korean-time";
+import { Redirect, useLocation, useRoute } from "wouter";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { TypingEffect } from "@/components/ui/typing-effect";
+import { 
+  Select, 
+  SelectContent, 
+  SelectItem, 
+  SelectTrigger, 
+  SelectValue 
+} from "@/components/ui/select";
+import { 
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger
+} from "@/components/ui/accordion";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+  DialogClose,
+  DialogDescription
+} from "@/components/ui/dialog";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Slider } from "@/components/ui/slider";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { Header } from "@/components/layout/header";
+import { Footer } from "@/components/layout/footer";
+import { Loader2, Send, Bot, User, ExternalLink, X, Plus, MessageSquareText, Leaf, Search, Crosshair, MapPin, CheckCircle, Store } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { startNewAIConversation } from "@/lib/api-utils";
+import GoogleMapWrapper from "@/components/map/google-map";
+import { DashboardLayout } from "@/components/layout/dashboard-layout";
+import { ConversationDrawer } from "@/components/conversation/conversation-drawer";
+
+// 식물 추천 타입 정의
+interface PlantRecommendation {
+  name: string;
+  description: string;
+  careInstructions: string;
+  priceRange: string;
+  imageUrl?: string;
+}
+
+// 상품 정보 타입 정의
+interface ProductInfo {
+  id?: number;
+  name: string;
+  price: number;
+  description?: string;
+  imageUrl?: string;
+  vendorName?: string;
+  storeName?: string;
+  basePrice?: number; // 기본가
+  bidPrice?: number; // 실제 입찰가
+  vendorProfileImageUrl?: string;
+  vendorId?: number;
+  vendorColor?: string;
+}
+
+// 채팅 메시지 타입 정의
+interface ChatMessage {
+  role: "user" | "assistant" | "vendor";
+  content: string;
+  timestamp: Date;
+  recommendations?: PlantRecommendation[];
+  imageUrl?: string; // 참고 이미지 URL
+  product?: ProductInfo; // 상품 정보 (판매자 입찰 시)
+  vendorId?: number; // 판매자 ID (판매자 메시지인 경우)
+  vendorName?: string; // 판매자 이름 (판매자 메시지인 경우)
+  storeName?: string; // 상점 이름 (판매자 메시지인 경우)
+  vendorColor?: string; // 판매자 색상 (판매자 메시지인 경우)
+}
+
+export default function AIConsultationPage() {
+  const { user } = useAuth();
+  const { toast } = useToast();
+  const { formatTime } = useKoreanTime();
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+  const [location, setLocation] = useLocation();
+  const [match, params] = useRoute("/ai-consultation");
+  const [input, setInput] = useState("");
+  const [conversationId, setConversationId] = useState<number | null>(null);
+  const [selectedMode, setSelectedMode] = useState<string | null>(null);
+  // 초기 메시지로 대화를 시작합니다
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [selectedPlant, setSelectedPlant] = useState<string | null>(null);
+  const [region, setRegion] = useState<string>("");
+  const [isSelectingRegion, setIsSelectingRegion] = useState(false);
+  const [infoDialogOpen, setInfoDialogOpen] = useState(false);
+  const [currentPlantInfo, setCurrentPlantInfo] = useState<PlantRecommendation | null>(null);
+  const [isCreatingNewConversation, setIsCreatingNewConversation] = useState(false);
+  
+  // 이미지 업로드 관련 상태
+  const [selectedImage, setSelectedImage] = useState<File | null>(null);
+  const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  
+  // 추가 상태들
+  const [interactionMode, setInteractionMode] = useState<"initial" | "ai-recommendation" | "manual-selection" | "location-selection" | "bid-requested">("initial");
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [selectedLocation, setSelectedLocation] = useState<{
+    address: string;
+    lat: number;
+    lng: number;
+    radius: number;
+  } | null>(null);
+
+  // 스크롤을 항상 최신 메시지로 이동 - messages가 변경될 때만 실행
+  useEffect(() => {
+    const chatContainer = document.getElementById('chat-container');
+    if (chatContainer) {
+      // setTimeout으로 약간 지연시켜 DOM이 완전히 업데이트된 후 스크롤하도록 함
+      const timeoutId = setTimeout(() => {
+        console.log('채팅창 스크롤 자동 이동');
+        chatContainer.scrollTo({
+          top: chatContainer.scrollHeight,
+          behavior: 'smooth'
+        });
+      }, 100);
+      
+      // 클린업 함수
+      return () => clearTimeout(timeoutId);
+    }
+  }, [messages]);
+
+  // URL 파라미터에서 대화 ID 가져오기 (페이지 로드 시 한번만 가져옴)
+  const searchParams = new URLSearchParams(window.location.search);
+  const conversationIdParam = searchParams.get('conversation');
+  
+  // 페이지 로드 시 마지막 대화 가져오기 또는 특정 대화 가져오기
+  useEffect(() => {
+    const loadConversationOnMount = async () => {
+      // 로그인한 사용자가 없으면 처리하지 않음
+      if (!user) {
+        console.log("사용자가 로그인하지 않아 대화를 가져오지 않음");
+        return;
+      }
+
+      try {
+        // URL에 대화 ID가 있으면 해당 대화를 로드
+        if (conversationIdParam) {
+          console.log(`페이지 로드 시 대화 ID: ${conversationIdParam} 가져오기`);
+          const response = await fetch(`/api/conversations/${conversationIdParam}`, {
+            credentials: 'include'
+          });
+          
+          if (!response.ok) {
+            console.error("대화 로드 실패:", response.status);
+            return;
+          }
+          
+          const conversation = await response.json();
+          console.log("서버에서 받은 대화 데이터:", conversation);
+          
+          // showLastConversation 파라미터가 있으면 대화 내용을 바로 표시
+          const showLastConversation = new URLSearchParams(window.location.search).get('showLastConversation');
+          if (showLastConversation === 'true') {
+            // 대화 내용 확장이 진행되면 오류가 발생할 수 있으므로 setTimeout으로 약간 지연
+            setTimeout(() => {
+              console.log('마지막 대화 표시 준비 중...');
+              // 채팅창 스크롤을 마지막으로 이동
+              const chatContainer = document.getElementById('chat-container');
+              if (chatContainer) {
+                console.log('채팅창 스크롤 이동');
+                chatContainer.scrollTo({
+                  top: chatContainer.scrollHeight,
+                  behavior: 'smooth'
+                });
+              }
+            }, 300);
+          }
+          
+          // 상태 업데이트
+          setConversationId(conversation.id);
+          
+          if (conversation.messages && conversation.messages.length > 0) {
+            const mappedMessages = conversation.messages.map((msg: any) => ({
+              role: msg.role,
+              content: msg.content,
+              timestamp: new Date(msg.timestamp),
+              recommendations: msg.recommendations || [],
+              product: msg.product, // 상품 정보 유지
+              vendorId: msg.vendorId,
+              vendorName: msg.vendorName,
+              storeName: msg.storeName,
+              vendorColor: msg.vendorColor
+            }));
+            setMessages(mappedMessages);
+          }
+        } else {
+          // URL에 대화 ID가 없으면 마지막 대화를 가져와서 표시
+          console.log("로그인 후 마지막 대화 가져오기 시도");
+          
+          // 전체 대화 목록 가져오기
+          const conversationsResponse = await fetch("/api/conversations", {
+            credentials: 'include'
+          });
+          
+          if (!conversationsResponse.ok) {
+            console.error("대화 목록 가져오기 실패:", conversationsResponse.status);
+            // 오류 발생 시 초기 메시지 표시
+            setInitialAssistantMessage();
+            return;
+          }
+          
+          const conversations = await conversationsResponse.json();
+          
+          if (conversations && conversations.length > 0) {
+            // 마지막 대화(가장 최근에 수정된 대화) 가져오기
+            const lastConversation = conversations[0]; // API가 정렬된 결과를 반환한다고 가정
+            console.log(`마지막 대화 가져오기: ID ${lastConversation.id}`);
+            
+            // 마지막 대화 데이터 가져오기
+            const response = await fetch(`/api/conversations/${lastConversation.id}`, {
+              credentials: 'include'
+            });
+            
+            if (response.ok) {
+              const conversation = await response.json();
+              console.log("마지막 대화 데이터:", conversation);
+              
+              // 상태 업데이트
+              setConversationId(conversation.id);
+              
+              // URL 업데이트 (URL이 변경되어도 실제 페이지 이동은 없음)
+              setLocation(`/ai-consultation?conversation=${conversation.id}&showLastConversation=true`);
+              
+              if (conversation.messages && conversation.messages.length > 0) {
+                // 메시지 매핑
+                const mappedMessages = conversation.messages.map((msg: any) => ({
+                  role: msg.role,
+                  content: msg.content,
+                  timestamp: new Date(msg.timestamp),
+                  recommendations: msg.recommendations || [],
+                  product: msg.product, // 상품 정보 유지
+                  vendorId: msg.vendorId,
+                  vendorName: msg.vendorName,
+                  storeName: msg.storeName,
+                  vendorColor: msg.vendorColor
+                }));
+                
+                setMessages(mappedMessages);
+                
+                // 채팅창 스크롤 이동
+                setTimeout(() => {
+                  const chatContainer = document.getElementById('chat-container');
+                  if (chatContainer) {
+                    console.log('마지막 대화 자동 스크롤 이동');
+                    chatContainer.scrollTo({
+                      top: chatContainer.scrollHeight,
+                      behavior: 'smooth'
+                    });
+                  }
+                }, 300);
+                
+                return; // 성공적으로 마지막 대화를 가져왔으므로 여기서 함수 종료
+              }
+            } else {
+              console.error("마지막 대화 데이터 가져오기 실패:", response.status);
+            }
+          }
+          
+          // 마지막 대화가 없거나 가져오기 실패 시 초기 메시지 표시
+          console.log("마지막 대화가 없거나 오류 발생, 초기 메시지 표시");
+          setInitialAssistantMessage();
+        }
+      } catch (error) {
+        console.error("대화 로드 중 예외 발생:", error);
+        // 오류 발생 시 초기 메시지 표시
+        setInitialAssistantMessage();
+      }
+    };
+    
+    // 초기 어시스턴트 메시지 설정 함수 추출
+    const setInitialAssistantMessage = () => {
+      console.log("초기 어시스턴트 메시지 설정");
+      setConversationId(null);
+      setSelectedMode(null);
+      setInteractionMode("initial");
+      
+      // 대화형 UI의 첫 메시지 설정
+      setMessages([
+        {
+          role: "assistant",
+          content: "안녕하세요? 당신의 식물생활을 도울 인공지능 심다입니다. 식물 추천방식을 선택해주세요",
+          timestamp: new Date()
+        }
+      ]);
+    };
+    
+    // 페이지 로드 시 한 번만 실행 
+    // user를 의존성에 추가하여 로그인 상태가 변경될 때마다 마지막 대화를 가져오도록 함
+    loadConversationOnMount();
+  }, [user, conversationIdParam]);
+  
+  // 대화 ID가 변경될 때마다 강제로 데이터를 다시 가져오기 위해 queryKey에 timestamp 추가
+  const queryTimestamp = useRef(Date.now()).current;
+  
+  // URL에서 conversationId 변화 감지는 더 이상 필요 없음 (페이지가 새로고침 되므로)
+  // 페이지 로드 시에만 대화 데이터를 한 번 가져옴
+  
+  // 특정 대화만 가져오기 (파라미터가 있을 때만)
+  const { data: conversationData } = useQuery({
+    queryKey: conversationIdParam ? 
+      [`/api/conversations/${conversationIdParam}`, queryTimestamp] : 
+      ["/api/none", queryTimestamp],
+    queryFn: async () => {
+      if (!user || !conversationIdParam) return null;
+      try {
+        const url = `/api/conversations/${conversationIdParam}`;
+        console.log("Fetching specific conversation from:", url);
+        const response = await fetch(url);
+        if (!response.ok) {
+          console.error("Failed to fetch conversation:", response.status);
+          return null;
+        }
+        const data = await response.json();
+        console.log("Fetched conversation data:", data);
+        return data;
+      } catch (error) {
+        console.error("Failed to fetch conversation:", error);
+        return null;
+      }
+    },
+    enabled: !!user && !!conversationIdParam, // 파라미터가 있을 때만 실행
+  });
+
+  // 대화 내용 로드 - conversationData가 변경될 때만 실행
+  useEffect(() => {
+    if (conversationData) {
+      setConversationId(conversationData.id);
+      
+      if (conversationData.messages && conversationData.messages.length > 0) {
+        setMessages(conversationData.messages.map((msg: any) => ({
+          role: msg.role,
+          content: msg.content,
+          timestamp: new Date(msg.timestamp),
+          recommendations: msg.recommendations
+        })));
+      }
+    }
+  }, [conversationData]);
+  
+  // 새 대화 생성 후 상태 변경
+  useEffect(() => {
+    if (isCreatingNewConversation && !conversationId) {
+      // AI 응답 요청 및 새 대화 생성
+      const createNewConversation = async () => {
+        try {
+          const response = await apiRequest("POST", "/api/conversations");
+          if (!response.ok) {
+            throw new Error("Failed to create new conversation");
+          }
+          
+          const data = await response.json();
+          setConversationId(data.id);
+          
+          // URL 업데이트
+          setLocation(`/ai-consultation?conversation=${data.id}`);
+          
+          // 쿼리 무효화
+          queryClient.invalidateQueries({ queryKey: ["/api/conversations"] });
+        } catch (error) {
+          console.error("Error creating new conversation:", error);
+          toast({
+            title: "새 대화 생성 실패",
+            description: "새 대화를 시작하는 중 오류가 발생했습니다.",
+            variant: "destructive",
+          });
+        } finally {
+          setIsCreatingNewConversation(false);
+        }
+      };
+      
+      createNewConversation();
+    }
+  }, [isCreatingNewConversation, conversationId]);
+
+  // 현재 타이핑 중인 메시지 상태 관리
+  const [typingMessage, setTypingMessage] = useState<ChatMessage | null>(null);
+  const [isTyping, setIsTyping] = useState(false);
+  
+  // 이미지 업로드 핸들러
+  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      setSelectedImage(e.target.files[0]);
+    }
+  };
+  
+  // 이미지 업로드 처리
+  const uploadImage = async () => {
+    if (!selectedImage) return null;
+    
+    setIsUploading(true);
+    
+    try {
+      const formData = new FormData();
+      formData.append('image', selectedImage);
+      
+      const response = await fetch('/api/upload-image', {
+        method: 'POST',
+        body: formData,
+      });
+      
+      if (!response.ok) {
+        throw new Error('이미지 업로드에 실패했습니다.');
+      }
+      
+      const data = await response.json();
+      setUploadedImageUrl(data.imageUrl);
+      return data.imageUrl;
+    } catch (error) {
+      console.error('이미지 업로드 중 오류 발생:', error);
+      toast({
+        title: '이미지 업로드 실패',
+        description: '이미지를 업로드하는 중 오류가 발생했습니다.',
+        variant: 'destructive',
+      });
+      return null;
+    } finally {
+      setIsUploading(false);
+    }
+  };
+  
+  // 이미지 업로드 취소
+  const handleCancelImage = () => {
+    setSelectedImage(null);
+    setUploadedImageUrl(null);
+  };
+  
+  // 메시지 전송 처리
+  const handleSendMessage = async () => {
+    if (!input.trim() || isProcessing) return;
+    
+    // 메시지 입력값 저장 및 초기화
+    const messageContent = input.trim();
+    setInput("");
+    setIsProcessing(true);
+    
+    // 이미지가 선택되었지만 아직 업로드되지 않은 경우, 업로드 진행
+    let imageUrl = uploadedImageUrl;
+    if (selectedImage && !uploadedImageUrl) {
+      imageUrl = await uploadImage();
+    }
+    
+    // 먼저 사용자 메시지 바로 화면에 추가
+    const userMessage: ChatMessage = {
+      role: "user",
+      content: messageContent,
+      timestamp: new Date(),
+      recommendations: [],
+      imageUrl: imageUrl || undefined
+    };
+    
+    setMessages(prevMessages => [...prevMessages, userMessage]);
+    
+    try {
+      // 서버에 메시지 전송
+      const response = await apiRequest("POST", "/api/ai/chat", {
+        conversationId: conversationId,
+        message: messageContent,
+        userId: user?.id,
+        imageUrl: imageUrl // 이미지 URL 추가
+      });
+      
+      if (!response.ok) {
+        throw new Error("Failed to get AI response");
+      }
+      
+      const data = await response.json();
+      
+      // 대화 ID 없었으면 새로 설정
+      if (data.conversationId && !conversationId) {
+        setConversationId(data.conversationId);
+      }
+      
+      // 새 응답 메시지 객체 생성
+      const assistantMessage: ChatMessage = {
+        role: "assistant",
+        content: data.content,
+        timestamp: new Date(),
+        recommendations: data.recommendations || []
+      };
+      
+      // 타이핑 효과로 메시지 표시 시작
+      setTypingMessage(assistantMessage);
+      setIsTyping(true);
+      
+      // 응답 메시지 표시 완료 후 수행할 작업
+      setTimeout(() => {
+        // 실제 대화 내용 가져오기 (추천 정보가 포함된 전체 대화)
+        const fetchFullConversation = async () => {
+          try {
+            const convResponse = await fetch(`/api/conversations/${data.conversationId || conversationId}`);
+            if (!convResponse.ok) {
+              throw new Error("Failed to fetch conversation");
+            }
+            
+            const convData = await convResponse.json();
+            
+            // 전체 대화 메시지로 상태 업데이트
+            if (convData && convData.messages) {
+              // 모든 메시지에 대해 timestamp를 Date 객체로 변환하고, 
+              // 서버 응답에 recommendatrions 배열이 있으면 그대로 사용
+              const updatedMessages = convData.messages.map((msg: any) => {
+                const messageWithTimestamp = {
+                  ...msg,
+                  timestamp: new Date(msg.timestamp),
+                  recommendations: msg.recommendations || []
+                };
+                
+                return messageWithTimestamp;
+              });
+              
+              // 디버깅: recommendations 데이터 확인
+              updatedMessages.forEach((msg: ChatMessage, idx: number) => {
+                if (msg.recommendations && msg.recommendations.length > 0) {
+                  console.log(`메시지 #${idx}에 추천 데이터 ${msg.recommendations.length}개 있음:`, 
+                    msg.recommendations.map((r: any) => r.name).join(', '));
+                }
+              });
+              
+              // plantRecommendations가 있으면 마지막 어시스턴트 메시지에 적용
+              if (convData.plantRecommendations && convData.plantRecommendations.length > 0) {
+                console.log("서버에서 받은 식물 추천 데이터:", convData.plantRecommendations.length, "개");
+                
+                // 마지막 어시스턴트 메시지 찾기
+                const lastAssistantIndex = updatedMessages
+                  .map((msg: ChatMessage, idx: number) => msg.role === 'assistant' ? idx : -1)
+                  .filter((idx: number) => idx !== -1)
+                  .pop();
+                
+                if (lastAssistantIndex !== undefined) {
+                  console.log(`마지막 어시스턴트 메시지(${lastAssistantIndex})에 추천 데이터 추가`);
+                  updatedMessages[lastAssistantIndex].recommendations = convData.plantRecommendations;
+                }
+              }
+              
+              setMessages(updatedMessages);
+              
+              // 콘솔에 대화 내용 로깅 (디버깅용)
+              console.log("서버에서 가져온 전체 대화:", convData);
+              console.log("플랜트 추천:", convData.plantRecommendations);
+            }
+          } catch (error) {
+            console.error("Error fetching conversation:", error);
+          } finally {
+            // 타이핑 상태 종료
+            setTypingMessage(null);
+            setIsTyping(false);
+            setIsProcessing(false);
+          }
+        };
+        
+        fetchFullConversation();
+      }, 1000); // 타이핑이 끝난 후 1초 후에 대화 내용 업데이트
+      
+    } catch (error) {
+      console.error("Error sending message:", error);
+      toast({
+        title: "오류 발생",
+        description: "메시지 전송 중 문제가 발생했습니다. 다시 시도해주세요.",
+        variant: "destructive",
+      });
+      setIsProcessing(false);
+      setIsTyping(false);
+      setTypingMessage(null);
+    }
+  };
+
+  // 식물 선택 처리
+  const handleSelectPlant = (plantName: string) => {
+    setSelectedPlant(plantName);
+    
+    // 중요: 상호작용 모드를 위치 선택 모드로 변경
+    setInteractionMode("location-selection");
+    
+    // 선택 메시지 추가
+    setMessages(prev => [
+      ...prev,
+      {
+        role: "user",
+        content: `"${plantName}"을(를) 선택했습니다.`,
+        timestamp: new Date()
+      }
+    ]);
+    
+    // 지역 선택 안내 및 지도 추가
+    if (!isSelectingRegion) {
+      setIsSelectingRegion(true);
+      
+      // 통합된 메시지 한 번만 추가
+      setTimeout(() => {
+        setMessages(prev => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "배송이나 선물을 위한 지역을 선택해주세요. 지도에서 위치를 선택하거나 검색해서 찾으세요. 해당 지역의 판매자들에게 입찰 요청이 전송됩니다.",
+            timestamp: new Date()
+          }
+        ]);
+      }, 100);
+    }
+  };
+  
+  // 상세정보 보기 처리 (식물 선택과 분리)
+  const handleViewDetails = (e: React.MouseEvent, plantAccordion: string) => {
+    // 이벤트 버블링 방지
+    e.stopPropagation();
+  };
+  
+  // 식물 정보 모달 열기
+  const handleShowPlantInfo = (plant: PlantRecommendation) => {
+    setCurrentPlantInfo(plant);
+    setInfoDialogOpen(true);
+  };
+  
+  // 판매자 입찰 선택 처리 함수
+  const handleSelectBid = (message: ChatMessage) => {
+    if (!message.product || !message.product.bidPrice) {
+      toast({
+        title: "입찰 선택 불가",
+        description: "실제 입찰가가 제시된 상품만 선택할 수 있습니다.",
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    // 상품 정보 가져오기
+    const product = message.product;
+    
+    // 결제 페이지로 이동
+    setLocation(`/payment?vendor=${message.vendorId}&product=${product.id}&price=${product.bidPrice}&name=${encodeURIComponent(product.name)}&store=${encodeURIComponent(message.storeName || '')}`);
+  };
+
+  // 지역 선택 및 입찰 요청 처리
+  const handleRequestBids = async () => {
+    if (!selectedPlant || !region.trim() || !user) {
+      toast({
+        title: "정보 부족",
+        description: "식물과 지역 정보가 필요합니다.",
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    setIsProcessing(true);
+    
+    try {
+      // 위치 기반 정보가 있으면 포함
+      const requestData: any = {
+        userId: user.id,
+        plantName: selectedPlant,
+        region: region,
+        storeName: region, // storeName을 region으로 설정 (서버에서 필수로 요구)
+        conversationId: conversationId
+      };
+      
+      // 위치 정보가 있으면 추가
+      if (selectedLocation) {
+        requestData.lat = selectedLocation.lat;
+        requestData.lng = selectedLocation.lng;
+        requestData.radius = selectedLocation.radius;
+      }
+      
+      const response = await apiRequest("POST", "/api/bids/request", requestData);
+      
+      if (!response.ok) {
+        throw new Error("Failed to request bids");
+      }
+      
+      const data = await response.json();
+      
+      // 입찰 요청 완료 메시지
+      const successMessage = selectedLocation 
+        ? `선택한 위치(${region}) 반경 ${selectedLocation.radius}km 이내의 판매자들에게 입찰 요청을 보냈습니다. 2시간 내에 입찰 결과를 알려드리겠습니다.`
+        : `${region} 지역의 판매자들에게 입찰 요청을 보냈습니다. 2시간 내에 입찰 결과를 알려드리겠습니다.`;
+        
+      // 1. 먼저 입찰 완료 메시지 추가 
+      setMessages(prev => [
+        ...prev,
+        {
+          role: "assistant",
+          content: successMessage,
+          timestamp: new Date()
+        }
+      ]);
+      
+      // 자동 스크롤
+      setTimeout(() => {
+        if (messagesEndRef.current) {
+          messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+        }
+        // mode도 여기서 변경 - 지도 컨테이너 이후에 메시지가 표시되도록
+        setInteractionMode("bid-requested");
+      }, 300);
+      
+      toast({
+        title: "입찰 요청 완료",
+        description: "지역 판매자들에게 입찰 요청을 보냈습니다.",
+      });
+      
+      // 입찰 요청 후에도 UI 유지 (Mode는 이미 위에서 변경됨)
+    } catch (error) {
+      console.error("Error requesting bids:", error);
+      toast({
+        title: "오류 발생",
+        description: "입찰 요청 중 문제가 발생했습니다. 다시 시도해주세요.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // 로그인 상태 확인
+  if (!user) {
+    return <Redirect to="/auth" />;
+  }
+
+  return (
+    <DashboardLayout>
+      <div className="container max-w-4xl mx-auto px-4 py-6">
+        <div className="flex flex-col gap-2 mb-6">
+          <div className="flex items-center justify-between">
+            <h1 className="text-3xl font-bold">인공지능 식물 상담</h1>
+            <div className="flex items-center gap-2">
+              <Button
+                onClick={() => setLocation("/recommendation")}
+                variant="secondary"
+                className="gap-1"
+              >
+                <Leaf className="h-4 w-4 mr-1" />
+                추천 마법사
+              </Button>
+              <ConversationDrawer />
+              <Button
+                onClick={() => {
+                  // 모든 상태 초기화
+                  setSelectedMode(null);
+                  setConversationId(null);
+                  setSelectedPlant(null);
+                  setRegion("");
+                  setInteractionMode("initial");
+                  setSearchResults([]);
+                  setSearchTerm("");
+                  setIsSearching(false);
+                  setIsSelectingRegion(false);
+                  setSelectedLocation(null);
+                  // 초기 메시지 설정 - 선택 화면 표시
+                  const initialMessage: ChatMessage = {
+                    role: "assistant", 
+                    content: "안녕하세요? 당신의 식물생활을 도울 인공지능 심다입니다. 식물 추천방식을 선택해주세요.", 
+                    timestamp: new Date()
+                  };
+                  setMessages([initialMessage]);
+                  
+                  // URL 초기화
+                  setLocation("/ai-consultation");
+                  
+                  // 초기화 로그
+                  console.log("새 대화 버튼 클릭: 모든 상태 초기화되고 초기 메시지 설정됨");
+                }}
+                disabled={isCreatingNewConversation}
+                variant="outline"
+                className="gap-1"
+              >
+                {isCreatingNewConversation ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Plus className="h-4 w-4" />
+                )}
+                새 대화
+              </Button>
+            </div>
+          </div>
+          
+          {conversationId && (
+            <div className="flex items-center text-sm text-muted-foreground">
+              <MessageSquareText className="h-4 w-4 mr-1.5" />
+              <span>대화 #{conversationId}</span>
+              {messages.length > 0 && (
+                <>
+                  <span className="mx-2">•</span>
+                  <span>{messages.length}개 메시지</span>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+        
+        {/* 채팅 메시지 영역 */}
+        <div 
+          className="bg-background border rounded-lg p-4 mb-4 h-[calc(100vh-240px)] overflow-y-auto" 
+          id="chat-container"
+          ref={chatContainerRef}>
+          
+          {/* 대화 메시지 영역이 비어있거나, 새 대화인 경우 초기 대화형 UI 표시 */}
+          {messages.length === 1 && messages[0].content.includes("안녕하세요? 당신의 식물생활을 도울 인공지능 심다입니다") && (
+            <>
+              {/* 초기 안내 메시지 */}
+              <div className="flex justify-start mb-4">
+                <div className="flex items-start max-w-[80%]">
+                  <Avatar className="h-8 w-8 mr-2">
+                    <AvatarImage src="" />
+                    <AvatarFallback>AI</AvatarFallback>
+                  </Avatar>
+                  
+                  <div className="flex flex-col gap-1">
+                    <Card className="p-3">
+                      <CardContent className="p-0">
+                        <p>{messages[0].content}</p>
+                        
+                        <div className="mt-4 flex flex-col gap-3">
+                          <Button
+                            onClick={async () => {
+                              setSelectedMode("ai");
+                              setInteractionMode("ai-recommendation");
+                              
+                              // 대화 시작 처리 시작
+                              setIsProcessing(true);
+                              // setIsCreatingNewConversation(true) 제거 - 이 부분이 중복 대화 생성의 원인
+                              
+                              try {
+                                console.log("AI 추천 버튼 클릭: 대화 시작됨");
+                                // 유틸리티 함수를 사용하여 새 대화 생성 요청
+                                const data = await startNewAIConversation(user?.id!);
+                                
+                                // 서버에서 받은 응답으로 전체 대화 구성
+                                if (data.conversationId) {
+                                  console.log("대화 ID 설정:", data.conversationId);
+                                  // 대화 ID 설정
+                                  setConversationId(data.conversationId);
+                                  
+                                  // 대화 내용 추출
+                                  if (data.messages && data.messages.length > 0) {
+                                    console.log("새 메시지 적용:", data.messages.length, "개");
+                                    // 서버에서 받은 메시지로 교체 (timestamps 변환 포함)
+                                    const formattedMessages = data.messages.map((msg: any) => ({
+                                      ...msg, 
+                                      timestamp: new Date(msg.timestamp)
+                                    }));
+                                    
+                                    console.log("변환된 메시지:", formattedMessages);
+                                    setMessages(formattedMessages);
+                                    
+                                    // URL 업데이트 (새 대화 ID 반영)
+                                    console.log("URL 업데이트");
+                                    setLocation(`/ai-consultation?conversation=${data.conversationId}`);
+                                  } else {
+                                    console.log("서버에서 받은 메시지가 없음");
+                                  }
+                                } else {
+                                  console.log("서버에서 대화 ID를 받지 못함");
+                                }
+                              } catch (error) {
+                                console.error("Error starting conversation:", error);
+                                toast({
+                                  title: "오류 발생",
+                                  description: "대화 시작 중 문제가 발생했습니다. 다시 시도해주세요.",
+                                  variant: "destructive",
+                                });
+                              } finally {
+                                setIsProcessing(false);
+                                setIsCreatingNewConversation(false);
+                              }
+                            }}
+                            variant="outline"
+                            className="flex items-center justify-start h-auto py-2 px-3 gap-2 bg-muted hover:bg-muted/80"
+                          >
+                            <Bot className="h-5 w-5 text-primary" />
+                            <div className="flex flex-col items-start">
+                              <span className="font-medium">AI 추천</span>
+                              <span className="text-xs text-muted-foreground">AI가 몇 가지 질문을 통해 당신에게 맞는 식물을 추천해 드립니다</span>
+                            </div>
+                          </Button>
+                          
+                          <Button
+                            onClick={() => {
+                              setSelectedMode("manual");
+                              setInteractionMode("manual-selection");
+                              
+                              // 사용자 메시지와 응답 생성
+                              const userMessage: ChatMessage = {
+                                role: "user",
+                                content: "직접 선택으로 진행할게요.",
+                                timestamp: new Date()
+                              };
+                              
+                              const assistantMessage: ChatMessage = {
+                                role: "assistant",
+                                content: "식물을 직접 검색하여 선택하는 모드입니다. 아래에서 원하는 식물을 검색해보세요.",
+                                timestamp: new Date()
+                              };
+                              
+                              // 메시지 설정
+                              setMessages([userMessage, assistantMessage]);
+                              
+                              console.log("직접 선택 버튼 클릭: 대화 상태 업데이트됨");
+                            }}
+                            variant="outline"
+                            className="flex items-center justify-start h-auto py-2 px-3 gap-2 bg-muted hover:bg-muted/80"
+                          >
+                            <Search className="h-5 w-5 text-primary" />
+                            <div className="flex flex-col items-start">
+                              <span className="font-medium">직접 선택</span>
+                              <span className="text-xs text-muted-foreground">원하는 식물을 직접 검색하고 선택할 수 있습니다</span>
+                            </div>
+                          </Button>
+                        </div>
+                      </CardContent>
+                    </Card>
+                    
+                    {/* 타임스탬프 */}
+                    <div className="text-xs text-muted-foreground text-left">
+                      {formatTime(new Date())}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+          
+          {/* 채팅 메시지 표시 - 대화가 시작된 경우 표시 */}
+          {!(messages.length === 1 && messages[0].content.includes("안녕하세요? 당신의 식물생활을 도울 인공지능 심다입니다")) && messages.map((message, index) => (
+            <div
+              key={index}
+              className={cn(
+                "flex mb-4",
+                message.role === "user" ? "justify-end" : "justify-start"
+              )}
+            >
+              <div
+                className={cn(
+                  "flex max-w-[80%]",
+                  message.role === "user" ? "flex-row-reverse" : "flex-row"
+                )}
+              >
+                {/* 아바타 */}
+                <div className="flex-shrink-0 mx-2">
+                  <Avatar>
+                    <AvatarFallback>
+                      {message.role === "user" 
+                        ? <User size={18} /> 
+                        : message.role === "vendor" 
+                          ? <Store size={18} /> 
+                          : <Bot size={18} />}
+                    </AvatarFallback>
+                    {message.role === "assistant" && (
+                      <AvatarImage src="/assets/plant-bot-avatar.png" />
+                    )}
+                  </Avatar>
+                </div>
+                
+                {/* 메시지 내용 */}
+                <div>
+                  <Card
+                    className={cn(
+                      "mb-1",
+                      message.role === "user"
+                        ? "bg-primary text-primary-foreground"
+                        : message.role === "vendor"
+                          ? "bg-white border border-gray-200"
+                          : "bg-muted"
+                    )}
+                  >
+                    <CardContent className="p-3">
+                      {/* 메시지 내용 표시 */}
+                      {/* 참고 이미지가 있으면 이미지 먼저 표시 */}
+                      {message.imageUrl && (
+                        <div className="mb-3">
+                          <div className="w-full max-w-[240px] h-auto rounded-md overflow-hidden">
+                            <img 
+                              src={message.imageUrl} 
+                              alt="참고 이미지" 
+                              className="w-full h-auto object-cover"
+                              onError={(e) => {
+                                console.log('참고 이미지 로드 오류:', message.imageUrl);
+                                e.currentTarget.src = '/assets/plants/default-plant.png';
+                              }}
+                            />
+                          </div>
+                          <div className="text-xs text-muted-foreground mt-1">
+                            참고 이미지
+                          </div>
+                        </div>
+                      )}
+                      
+                      <div className="whitespace-pre-wrap">
+                        {/* JSON 포맷인 경우 포맷팅하여 표시 */}
+                        {message.content && message.content.includes('"recommendations":') ? (
+                          <>
+                            {/* JSON이 포함된 메시지는 recommendations 부분을 제외하고 표시 */}
+                            {message.content.split('"recommendations":')[0]
+                              .replace(/{|"content":|"|}|,$/g, '')
+                              .trim()}
+                          </>
+                        ) : message.role !== "vendor" || !message.product ? (
+                          message.role === 'assistant' && isTyping && typingMessage && 
+                          typingMessage.timestamp.getTime() === message.timestamp.getTime() ? (
+                            <TypingEffect 
+                              text={message.content} 
+                              speed={20}
+                            />
+                          ) : (
+                            // 줄바꿈 코드를 실제 줄바꿈으로 변환하여 표시
+                            message.content.replace(/\\n/g, '\n')
+                          )
+                        ) : null}
+                        
+                        {/* 판매자 메시지에서 상품 정보 표시 - 새 디자인 */}
+                        {message.role === "vendor" && message.product && (
+                          <div className="mt-3">
+                            <div className="flex flex-col items-start">
+                              {/* 판매자 정보 헤더 */}
+                              {message.vendorName && (
+                                <div className="mb-2 flex items-center">
+                                  <div 
+                                    className="w-4 h-4 rounded-full mr-1.5" 
+                                    style={message.vendorColor ? {backgroundColor: message.vendorColor} : {backgroundColor: '#6E56CF'}}
+                                  ></div>
+                                  <span className="font-medium">{message.vendorName}</span>
+                                  {message.storeName && (
+                                    <span className="text-sm text-muted-foreground ml-1">({message.storeName})</span>
+                                  )}
+                                </div>
+                              )}
+                              
+                              {/* 상품 카드 - 새 디자인 */}
+                              <div className="bg-background rounded-lg overflow-hidden border w-full mb-3 shadow-sm hover:shadow-md transition-all duration-200">
+                                <div className="flex flex-col md:flex-row">
+                                  {/* 이미지 영역 */}
+                                  {message.product.imageUrl && (
+                                    <div className="md:w-1/3 overflow-hidden bg-muted">
+                                      <img 
+                                        src={message.product.imageUrl} 
+                                        alt={message.product.name}
+                                        className="w-full h-full object-cover aspect-square md:aspect-auto"
+                                        onError={(e) => {
+                                          console.log('상품 이미지 로드 오류:', message.product.imageUrl);
+                                          e.currentTarget.src = '/assets/plants/default-plant.png';
+                                        }}
+                                      />
+                                    </div>
+                                  )}
+                                  
+                                  {/* 상품 정보 영역 */}
+                                  <div className="p-4 flex flex-col justify-between md:w-2/3">
+                                    <div>
+                                      {/* 상품명과 기본가 */}
+                                      <div className="flex justify-between items-start mb-2">
+                                        <h3 className="text-lg font-semibold">{message.product.name}</h3>
+                                        {message.product.basePrice && (
+                                          <span className="line-through text-muted-foreground text-sm">
+                                            {message.product.basePrice.toLocaleString()}원
+                                          </span>
+                                        )}
+                                      </div>
+                                      
+                                      {/* 입찰가/판매가 표시 */}
+                                      {message.product.bidPrice ? (
+                                        <div className="font-bold text-xl text-primary mb-3">
+                                          {message.product.bidPrice.toLocaleString()}원
+                                        </div>
+                                      ) : message.product.price ? (
+                                        <div className="font-bold text-xl mb-3">
+                                          {message.product.price.toLocaleString()}원
+                                        </div>
+                                      ) : null}
+                                      
+                                      {/* 상품 설명 */}
+                                      {message.product.description && (
+                                        <p className="text-sm text-muted-foreground mb-3">
+                                          {message.product.description}
+                                        </p>
+                                      )}
+                                      
+                                      {/* 판매자 상호 표시 (작게) */}
+                                      <div className="flex items-center mb-3">
+                                        <div 
+                                          className="w-3 h-3 rounded-full mr-1.5" 
+                                          style={message.vendorColor ? {backgroundColor: message.vendorColor} : {backgroundColor: '#6E56CF'}}
+                                        ></div>
+                                        <span className="text-xs text-muted-foreground">
+                                          {message.storeName || message.vendorName}
+                                        </span>
+                                      </div>
+                                    </div>
+                                    
+                                    {/* 구매 버튼 */}
+                                    <Button 
+                                      className={message.product.bidPrice ? "bg-primary hover:bg-primary/90" : ""}
+                                      variant={message.product.bidPrice ? "default" : "outline"}
+                                      onClick={() => handleSelectBid(message)}
+                                      disabled={!message.product.bidPrice}
+                                    >
+                                      {message.product.bidPrice 
+                                        ? "이 상품 구매하기" 
+                                        : "입찰가 없음 (구매 불가)"}
+                                    </Button>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                        
+                        {/* 추천 식물이 있으면 별도로 표시 */}
+                        {message.recommendations && message.recommendations.length > 0 && (
+                          <div className="mt-3 pt-3 border-t">
+                            <div className="font-medium mb-2">🌿 추천 식물:</div>
+                            <div className="space-y-4">
+                              {message.recommendations.map((plant: PlantRecommendation, idx: number) => (
+                                <div key={idx} className="bg-background/50 rounded-md p-3 shadow-sm">
+                                  <div className="flex justify-between items-start">
+                                    <h3 className="font-medium text-primary">{plant.name || `추천 식물 ${idx+1}`}</h3>
+                                    <Badge variant="outline" className="ml-2">
+                                      {plant.priceRange || "가격 정보 없음"}
+                                    </Badge>
+                                  </div>
+                                  <p className="text-sm mt-1 text-muted-foreground">{plant.description || "설명 정보가 없습니다."}</p>
+                                  {plant.careInstructions && (
+                                    <div className="mt-2">
+                                      <h4 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">관리 방법</h4>
+                                      <p className="text-sm">{plant.careInstructions}</p>
+                                    </div>
+                                  )}
+                                  
+                                  <div className="flex justify-between mt-3">
+                                    <Button 
+                                      size="sm" 
+                                      variant="outline"
+                                      onClick={() => handleShowPlantInfo(plant)}
+                                      className="text-xs"
+                                    >
+                                      식물 상세정보
+                                    </Button>
+                                    <Button 
+                                      size="sm"
+                                      onClick={() => {
+                                        handleSelectPlant(plant.name);
+                                        setInteractionMode("location-selection");
+                                      }}
+                                      className="text-xs"
+                                    >
+                                      이 식물 선택하기
+                                    </Button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      
+                      {/* 입찰 요청 완료 후 버튼은 사용자 요청에 따라 삭제함 */}
+                      
+                      {/* 초기 선택 옵션 - 첫 메시지에만 표시 */}
+                      {message.role === "assistant" && 
+                       message.content.includes("식물 추천을 어떤 방식으로 진행할까요?") && 
+                       interactionMode === "initial" && (
+                        <div className="mt-4 space-y-3">
+                          <h3 className="font-medium">추천 방식을 선택해주세요:</h3>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <Button 
+                              variant="outline"
+                              className="flex flex-col items-center gap-2 p-4 h-auto"
+                              onClick={async () => {
+                                // 대화 상태와 처리 상태 설정
+                                setInteractionMode("ai-recommendation");
+                                setIsProcessing(true);
+                                
+                                console.log("기존 UI의 AI 추천 버튼 클릭: 새 대화 생성");
+                                
+                                try {
+                                  // 유틸리티 함수를 사용하여 새 대화 생성 요청
+                                  const data = await startNewAIConversation(user?.id!);
+                                  
+                                  // 이제 conversationId를 설정하고 해당 URL로 이동
+                                  if (data.conversationId) {
+                                    setConversationId(data.conversationId);
+                                    
+                                    // 대화 내용 추출
+                                    if (data.messages && data.messages.length > 0) {
+                                      // 서버에서 받은 메시지로 교체 (timestamps 변환 포함)
+                                      setMessages(data.messages.map((msg: any) => ({
+                                        ...msg,
+                                        timestamp: new Date(msg.timestamp)
+                                      })));
+                                      
+                                      // URL 업데이트 (새 대화 ID 반영)
+                                      setLocation(`/ai-consultation?conversation=${data.conversationId}`);
+                                    }
+                                  }
+                                } catch (error) {
+                                  console.error("Error starting conversation:", error);
+                                  toast({
+                                    title: "오류 발생",
+                                    description: "대화 시작 중 문제가 발생했습니다. 다시 시도해주세요.",
+                                    variant: "destructive",
+                                  });
+                                } finally {
+                                  setIsProcessing(false);
+                                }
+                              }}
+                            >
+                              <Bot className="h-8 w-8 text-primary mb-1" />
+                              <span className="font-medium">AI 추천</span>
+                              <span className="text-xs text-center text-muted-foreground">
+                                질문에 답하고 AI가 맞춤 식물을 추천받기
+                              </span>
+                            </Button>
+                            
+                            <Button 
+                              variant="outline"
+                              className="flex flex-col items-center gap-2 p-4 h-auto"
+                              onClick={async () => {
+                                setInteractionMode("manual-selection");
+                                
+                                // 사용자 메시지 추가
+                                const userMessage: ChatMessage = {
+                                  role: "user",
+                                  content: "직접 선택으로 진행할게요.",
+                                  timestamp: new Date()
+                                };
+                                
+                                // 어시스턴트 메시지 추가
+                                const assistantMessage: ChatMessage = {
+                                  role: "assistant",
+                                  content: "알겠습니다. 식물 이름을 검색하여 선택하실 수 있습니다.",
+                                  timestamp: new Date()
+                                };
+                                
+                                setMessages(prev => [...prev, userMessage, assistantMessage]);
+                              }}
+                            >
+                              <Search className="h-8 w-8 text-primary mb-1" />
+                              <span className="font-medium">직접 선택</span>
+                              <span className="text-xs text-center text-muted-foreground">
+                                직접 식물을 검색하고 선택하기
+                              </span>
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                      
+                      {/* 식물 검색 인터페이스 - 직접 선택 모드일 때 표시 */}
+                      {message.role === "assistant" && 
+                       (message.content.includes("식물 이름을 검색하여 선택하실 수 있습니다") || 
+                        message.content.includes("직접 검색하여 선택하는 모드")) && 
+                       interactionMode === "manual-selection" && (
+                        <div className="mt-4 border rounded-md p-3 bg-background">
+                          <div className="space-y-4">
+                            <div className="flex gap-2">
+                              <div className="relative flex-1">
+                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                                <Input
+                                  placeholder="식물 이름 검색..."
+                                  value={searchTerm}
+                                  onChange={(e) => setSearchTerm(e.target.value)}
+                                  className="pl-9"
+                                />
+                                {searchTerm && (
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7"
+                                    onClick={() => setSearchTerm("")}
+                                  >
+                                    <X className="h-4 w-4" />
+                                  </Button>
+                                )}
+                              </div>
+                              <Button 
+                                onClick={async () => {
+                                  setIsSearching(true);
+                                  try {
+                                    const url = searchTerm.trim() 
+                                      ? `/api/plants/search?q=${encodeURIComponent(searchTerm)}` 
+                                      : `/api/plants`;
+                                    
+                                    const response = await fetch(url);
+                                    if (!response.ok) {
+                                      throw new Error('식물 검색 실패');
+                                    }
+                                    
+                                    const data = await response.json();
+                                    setSearchResults(data);
+                                  } catch (error) {
+                                    console.error('Error searching plants:', error);
+                                    toast({
+                                      title: "검색 오류",
+                                      description: "식물 검색 중 오류가 발생했습니다.",
+                                      variant: "destructive",
+                                    });
+                                  } finally {
+                                    setIsSearching(false);
+                                  }
+                                }}
+                                disabled={isSearching}
+                              >
+                                {isSearching ? <Loader2 className="h-4 w-4 animate-spin" /> : "검색"}
+                              </Button>
+                            </div>
+                            
+                            {isSearching ? (
+                              <div className="grid grid-cols-2 gap-3">
+                                {Array(4).fill(0).map((_, i) => (
+                                  <div key={i} className="space-y-2">
+                                    <Skeleton className="h-28 w-full rounded-md" />
+                                    <Skeleton className="h-4 w-3/4" />
+                                  </div>
+                                ))}
+                              </div>
+                            ) : searchResults.length > 0 ? (
+                              <div className="grid grid-cols-2 gap-3">
+                                {searchResults.map((plant: any) => (
+                                  <div
+                                    key={plant.id}
+                                    className="border rounded-md overflow-hidden cursor-pointer hover:border-primary transition-colors"
+                                    onClick={() => {
+                                      handleSelectPlant(plant.name);
+                                      setInteractionMode("location-selection");
+                                    }}
+                                  >
+                                    <div 
+                                      className="h-28 bg-center bg-cover"
+                                      style={{ backgroundImage: `url(${plant.imageUrl || '/assets/plants/default-plant.png'})` }}
+                                    />
+                                    <div className="p-2">
+                                      <h3 className="font-medium text-sm truncate">{plant.name}</h3>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="py-4 text-center">
+                                <p className="text-muted-foreground text-sm">검색어를 입력하고 검색 버튼을 눌러주세요</p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                      
+                      {/* 구글 지도 - 위치 선택 모드일 때 표시 */}
+                      {message.role === "assistant" && 
+                       (interactionMode === "location-selection" || interactionMode === "bid-requested") && 
+                       (message.content.includes("위치를 선택하거나 검색해서 찾으세요") || 
+                        message.content.includes("지역을 선택해주세요")) && (
+                          <div className="mt-4 bg-background rounded-md border mb-4">
+                            <div className="p-4 space-y-4">
+                              {/* 선택된 식물 정보 */}
+                              <div className="text-center p-2 bg-accent/20 rounded-md">
+                                <p className="text-sm font-medium">선택된 식물: {selectedPlant}</p>
+                              </div>
+                              
+                              <Card className="w-full">
+                                <CardContent className="p-3">
+                                  <div id="location-map-container" className="rounded-md overflow-hidden w-full">
+                                    <GoogleMapWrapper 
+                                      height="320px"
+                                      width="100%"
+                                      showSearchBar={interactionMode !== "bid-requested"}
+                                      showRadiusControl={interactionMode !== "bid-requested"}
+                                      showLocationInfo={true}
+                                      onLocationSelect={(location: { lat: number; lng: number; address: string; radius?: number }) => {
+                                        setSelectedLocation({
+                                          lat: location.lat,
+                                          lng: location.lng,
+                                          address: location.address,
+                                          radius: location.radius || 5
+                                        });
+                                        setRegion(location.address);
+                                      }}
+                                    />
+                                  </div>
+                                
+                                {/* 입찰 요청 버튼 - 요청 완료 후(bid-requested 모드)에는 표시하지 않음 */}
+                                {interactionMode !== "bid-requested" && (
+                                  <Button 
+                                    onClick={handleRequestBids}
+                                    disabled={!selectedPlant || !region.trim()}
+                                    className="w-full mt-4"
+                                  >
+                                    <MapPin className="h-4 w-4 mr-2" /> 입찰 요청하기
+                                  </Button>
+                                )}
+                              </CardContent>
+                            </Card>
+
+                          </div>
+                        </div>
+                      )}
+                      
+                      {/* 아래쪽 추천 식물 섹션은 삭제함 - 위쪽에 이미 표시되고 있음 */}
+                    </CardContent>
+                  </Card>
+                  
+                  {/* 타임스탬프 */}
+                  <div
+                    className={cn(
+                      "text-xs text-muted-foreground",
+                      message.role === "user" ? "text-right" : "text-left"
+                    )}
+                  >
+                    {formatTime(message.timestamp)}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+          
+          {/* 이제 지도는 채팅 메시지 내에서 직접 렌더링됩니다 */}
+          
+          {/* 메시지 로딩 표시 */}
+          {isProcessing && !isSelectingRegion && (
+            <div className="flex justify-start mb-4">
+              <div className="bg-muted p-3 rounded-lg flex items-center">
+                <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                <span>응답 생성 중...</span>
+              </div>
+            </div>
+          )}
+          
+          {/* 자동 스크롤을 위한 참조 */}
+          <div ref={messagesEndRef} />
+        </div>
+        
+        {/* 메시지 입력 영역 */}
+        <div className="flex flex-col gap-2">
+          {/* 참고 이미지 업로드 영역 (있는 경우만 표시) */}
+          {(selectedImage || uploadedImageUrl) && (
+            <div className="flex items-center gap-2 p-2 bg-muted rounded-md">
+              <div className="flex-1 flex items-center">
+                {uploadedImageUrl ? (
+                  <div className="relative w-16 h-16 overflow-hidden rounded-md">
+                    <img 
+                      src={uploadedImageUrl} 
+                      alt="참고 이미지" 
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                ) : selectedImage ? (
+                  <div className="flex items-center text-sm">
+                    <div className="bg-primary/10 text-primary rounded-full p-1 mr-2">
+                      <img 
+                        src={URL.createObjectURL(selectedImage)} 
+                        alt="미리보기" 
+                        className="w-14 h-14 object-cover rounded-md"
+                      />
+                    </div>
+                    <span className="text-muted-foreground">{selectedImage.name}</span>
+                  </div>
+                ) : null}
+              </div>
+              <Button 
+                variant="ghost" 
+                size="icon"
+                onClick={handleCancelImage}
+                className="text-destructive hover:text-destructive/80"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Textarea
+                placeholder="메시지를 입력하세요..."
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSendMessage();
+                  }
+                }}
+                className="resize-none"
+                disabled={isProcessing}
+              />
+              
+              {/* 이미지 업로드 버튼 */}
+              <label 
+                htmlFor="image-upload" 
+                className={`absolute bottom-2 right-2 p-1 rounded-full cursor-pointer ${
+                  isProcessing ? 'opacity-50 cursor-not-allowed' : 'hover:bg-muted'
+                }`}
+              >
+                <input
+                  id="image-upload"
+                  type="file"
+                  accept="image/*"
+                  onChange={handleImageSelect}
+                  disabled={isProcessing}
+                  className="hidden"
+                />
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground">
+                  <rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>
+                  <circle cx="9" cy="9" r="2"/>
+                  <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>
+                </svg>
+              </label>
+            </div>
+            
+            <Button
+              onClick={handleSendMessage}
+              disabled={!input.trim() || isProcessing}
+              className="flex-shrink-0"
+            >
+              {isUploading ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Send className="h-4 w-4" />
+              )}
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* 식물 정보 모달 */}
+      <Dialog open={infoDialogOpen} onOpenChange={setInfoDialogOpen}>
+        <DialogContent className="max-w-3xl w-[90vw] max-h-[80vh] h-[600px] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex-1">{currentPlantInfo?.name}</DialogTitle>
+            <DialogDescription className="sr-only">
+              구글에서 "{currentPlantInfo?.name}" 식물 정보 보기
+            </DialogDescription>
+          </DialogHeader>
+          
+          <div className="flex flex-col h-full overflow-hidden">
+            {currentPlantInfo && (
+              <iframe 
+                src={`https://www.google.com/search?q=${encodeURIComponent(currentPlantInfo.name)}&igu=1`}
+                className="w-full h-full border-none"
+                title={`${currentPlantInfo.name} 정보`}
+              />
+            )}
+          </div>
+          
+          <DialogFooter className="flex justify-between items-center">
+            <div className="text-sm text-muted-foreground">
+              {currentPlantInfo?.priceRange}
+            </div>
+            <Button
+              onClick={() => {
+                if (currentPlantInfo) {
+                  window.open(`https://www.google.com/search?q=${encodeURIComponent(currentPlantInfo.name)}`, '_blank');
+                }
+              }}
+              size="sm"
+              variant="outline"
+              className="flex items-center gap-1"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              새 창에서 열기
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </DashboardLayout>
+  );
+}
