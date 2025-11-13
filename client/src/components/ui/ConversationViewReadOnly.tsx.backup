@@ -1,0 +1,524 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { WifiOff } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { getVendorColorClasses } from "@/lib/utils";
+import { PlantRecommendations } from './PlantRecommendations';
+import { VendorRecommendations } from './VendorRecommendations';
+import { MapLocationInfo } from './MapLocationInfo';
+import { LocateIcon } from "lucide-react";
+
+export function ConversationViewReadOnly({ 
+  conversationId, 
+  user,
+  className = "" 
+}: { 
+  conversationId?: number; 
+  user: { name?: string; role?: string; viewMode?: string };
+  className?: string;
+}) {
+  const [chatMessages, setChatMessages] = useState<any[]>([]);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [wsError, setWsError] = useState<string | null>(null);
+  const { toast } = useToast();
+  
+  // 마지막으로 로드된 메시지 ID 추적
+  const lastMessageIdRef = useRef<string | null>(null);
+  // 마지막 폴링 시간 추적
+  const lastPollingTimeRef = useRef<number>(0);
+  // 폴링이 진행 중인지 추적
+  const isPollingRef = useRef<boolean>(false);
+
+  // 대화 내용 가져오기
+  const fetchConversation = useCallback(async () => {
+    if (!conversationId) return;
+    
+    try {
+      console.log(`대화 ID ${conversationId} 데이터 가져오기 시작`);
+      
+      // 재시도 로직 구현
+      let response;
+      let retries = 0;
+      const maxRetries = 3;
+      
+      while (retries < maxRetries) {
+        try {
+          response = await fetch(`/api/conversations/${conversationId}`);
+          if (response.ok) break; // 성공하면 루프 종료
+          
+          console.warn(`대화 데이터 가져오기 실패 (${retries + 1}/${maxRetries}): HTTP ${response.status}`);
+          retries++;
+          
+          if (retries >= maxRetries) break;
+          // 재시도 사이에 짧은 지연 시간 추가
+          await new Promise(resolve => setTimeout(resolve, 800));
+        } catch (fetchError) {
+          console.error(`대화 데이터 페치 오류 (${retries + 1}/${maxRetries}):`, fetchError);
+          retries++;
+          if (retries >= maxRetries) throw fetchError;
+          await new Promise(resolve => setTimeout(resolve, 800));
+        }
+      }
+      
+      if (!response || !response.ok) {
+        const errorStatus = response ? response.status : 'unknown';
+        throw new Error(`대화를 불러오는데 실패했습니다 (HTTP ${errorStatus})`);
+      }
+      
+      const data = await response.json();
+      if (data.messages && Array.isArray(data.messages)) {
+        // 메시지 필터링 로직 완화 - 모든 역할의 메시지 표시
+        const validMessages = data.messages.filter((msg: any) => 
+          msg && msg.role && (
+            // 일반 메시지는 내용이 있거나 가격 정보가 있으면 표시
+            (msg.content !== undefined && msg.content !== null) ||
+            // 판매자 메시지는 빈 내용이어도 다른 정보가 있으면 표시 
+            (msg.role === 'vendor' && (msg.price || msg.bidStatus || msg.referenceImages))
+          )
+        );
+        
+        // 마지막 메시지 ID 확인 (필요하면 이 ID를 사용해 부분 업데이트 요청 가능)
+        const latestMessage = validMessages[validMessages.length - 1];
+        if (latestMessage) {
+          const newLastMsgId = `${latestMessage.role}-${latestMessage.timestamp || latestMessage.createdAt}`;
+          if (lastMessageIdRef.current === newLastMsgId) {
+            console.log('새 메시지가 없습니다. 업데이트 생략');
+            return;
+          }
+          lastMessageIdRef.current = newLastMsgId;
+        }
+        
+        // 메시지 종류 분리 (디버깅용, 필요한 경우에만 로그)
+        const messageCount = validMessages.length;
+        if (messageCount > 0) {
+          console.log(`총 ${messageCount}개 메시지 로드됨`);
+        }
+        
+        // 정제된 메시지로 대체
+        data.messages = validMessages;
+        
+        // 모든 메시지 처리하기
+        let processedMessages: any[] = [];
+        
+        // 판매자별 색상 캐시 (동일한 판매자 메시지에 일관된 색상 적용)
+        const vendorColors: Record<number, string> = {};
+        
+        // 그룹화된 판매자 메시지를 처리
+        for (const msg of data.messages) {
+          // 메시지 병합 대신 모든 메시지 표시
+          processedMessages.push(msg);
+          
+          // 판매자 메시지인 경우 색상 캐싱
+          if (msg.role === 'vendor' && msg.vendorId) {
+            if (!vendorColors[msg.vendorId]) {
+              vendorColors[msg.vendorId] = msg.vendorColor || 'bg-blue-50';
+            }
+          }
+        }
+        
+        // 메시지 설정
+        setChatMessages(processedMessages);
+      }
+    } catch (error) {
+      console.error("대화 로드 오류:", error);
+      setWsConnected(false); // 연결 실패 상태로 설정
+      toast({
+        title: "대화 로드 실패",
+        description: "대화 내용을 불러오는데 실패했습니다.",
+        variant: "destructive"
+      });
+    }
+  }, [conversationId, toast]);
+  
+  // 메시지 전송 이벤트를 처리하는 함수
+  const handleMessageSent = useCallback((event: CustomEvent) => {
+    const eventDetail = event.detail as { conversationId: number };
+    
+    // 현재 대화에 대한 이벤트인지 확인
+    if (conversationId && eventDetail.conversationId === conversationId) {
+      console.log(`메시지 전송 이벤트 감지됨: 대화 ID ${conversationId} 새로고침`);
+      fetchConversation();
+    }
+  }, [conversationId, fetchConversation]);
+  
+  // 주기적 새로고침을 위한 폴링 설정
+  useEffect(() => {
+    if (!conversationId) return;
+    
+    // 데이터 로드 시작
+    setWsConnected(true);
+    setWsError(null);
+    lastMessageIdRef.current = null;
+    
+    console.log(`대화 ID ${conversationId} 데이터 로드 시작`);
+    
+    // 초기 로드
+    fetchConversation();
+    
+    // 메시지 전송 이벤트 리스너 등록
+    window.addEventListener('message-sent', handleMessageSent as EventListener);
+    
+    // 주기적 업데이트를 위한 인터벌 설정 (10초마다)
+    const intervalId = setInterval(() => {
+      // 이미 폴링 중이면 건너뛰기
+      if (isPollingRef.current) {
+        console.log('이전 폴링이 진행 중입니다. 이번 폴링은 생략합니다.');
+        return;
+      }
+      
+      // 마지막 폴링 시간 체크 (너무 짧은 간격으로 폴링 방지)
+      const now = Date.now();
+      const timeSinceLastPoll = now - lastPollingTimeRef.current;
+      if (timeSinceLastPoll < 5000) { // 5초 미만이면 스킵
+        console.log(`마지막 폴링 후 ${timeSinceLastPoll}ms 지남. 최소 간격은 5000ms`);
+        return;
+      }
+      
+      console.log(`대화 ${conversationId} 주기적 업데이트 실행`);
+      isPollingRef.current = true;
+      lastPollingTimeRef.current = now;
+      
+      // 폴링 실행 및 상태 업데이트
+      fetchConversation()
+        .finally(() => {
+          isPollingRef.current = false;
+        });
+    }, 10000);
+    
+    // 컴포넌트 언마운트 시 정리
+    return () => {
+      clearInterval(intervalId);
+      window.removeEventListener('message-sent', handleMessageSent as EventListener);
+      
+      console.log(`대화 ID ${conversationId} 폴링 종료됨`);
+    };
+  }, [conversationId, fetchConversation, handleMessageSent]);
+  
+  // 스크롤 관리 효과 (새 메시지가 도착하면 자동 스크롤)
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages]);
+  
+  // 메시지 그룹화 처리
+  const renderMessages = () => {
+    console.log("메시지 렌더링:", chatMessages);
+    
+    // 메시지 수를 콘솔로 자세히 출력
+    if (chatMessages && chatMessages.length) {
+      console.log(`총 ${chatMessages.length}개 메시지 렌더링 중`);
+      console.log(`첫 번째 메시지:`, chatMessages[0]);
+      console.log(`마지막 메시지:`, chatMessages[chatMessages.length - 1]);
+      
+      // product 속성이 있는 메시지 검색
+      const messagesWithProduct = chatMessages.filter(msg => msg.product);
+      console.log(`product 있는 메시지: ${messagesWithProduct.length}개`);
+      if (messagesWithProduct.length > 0) {
+        console.log("제품 포함 메시지 예시:", messagesWithProduct[0]);
+      }
+      
+      // referenceImages 속성이 있는 메시지 검색
+      const messagesWithRefImages = chatMessages.filter(msg => 
+        msg.referenceImages && msg.referenceImages.length > 0
+      );
+      console.log(`참조 이미지 있는 메시지: ${messagesWithRefImages.length}개`);
+    }
+    
+    if (!chatMessages || !chatMessages.length) {
+      return <div className="text-center text-gray-500 py-8">대화가 없습니다.</div>;
+    }
+    
+    // 메시지 그룹화 및 중복 필터링 처리
+    // 판매자 메시지 중 '입찰내용을 검토중입니다'와 같은 중복 상태 메시지 필터링
+    const processedMessages: any[] = [];
+    const statusMessages = new Set(['입찰내용을 검토중입니다', '상품이 추가되어 입찰을 검토중입니다', '입찰이 완료되었습니다. 확인해 주세요.']);
+    const seenStatusMessagesPerVendor: Record<number, Set<string>> = {};
+    
+    // 판매자 ID 별로 제품 정보가 있는 메시지를 찾는다
+    const vendorProductMessages: Record<number, any[]> = {};
+    
+    // 첫 단계: 메시지 정리 및 분류
+    chatMessages.forEach(msg => {
+      if (msg.role === 'vendor') {
+        const vendorId = msg.vendorId || 0;
+        
+        // 판매자별 상태 메시지 추적을 위한 Set 초기화
+        if (!seenStatusMessagesPerVendor[vendorId]) {
+          seenStatusMessagesPerVendor[vendorId] = new Set();
+        }
+        
+        // 판매자별 제품 메시지 배열 초기화
+        if (!vendorProductMessages[vendorId]) {
+          vendorProductMessages[vendorId] = [];
+        }
+        
+        // 제품 정보가 있는 메시지 저장
+        if (msg.product) {
+          vendorProductMessages[vendorId].push(msg);
+        }
+        
+        // 중복 상태 메시지 필터링
+        if (msg.content && statusMessages.has(msg.content)) {
+          if (seenStatusMessagesPerVendor[vendorId].has(msg.content)) {
+            // 이미 같은 상태 메시지가 있으면 스킵
+            return;
+          }
+          seenStatusMessagesPerVendor[vendorId].add(msg.content);
+        }
+      }
+      
+      // 모든 비 중복 메시지 저장
+      processedMessages.push(msg);
+    });
+    
+    // 두 번째 단계: 최종 그룹 메시지 렌더링
+    return processedMessages.map((msg, index) => {
+      // 역할 정확히 확인
+      const isVendor = msg.role === 'vendor';
+      const isUser = msg.role === 'user';
+      const isAssistant = msg.role === 'assistant';
+      
+      // 특수 메시지 타입 확인
+      const isPlantRecommendation = isAssistant && msg.recommendations && msg.recommendations.length > 0;
+      const isVendorRecommendation = isAssistant && msg.vendors && msg.vendors.length > 0;
+      const isLocationInfo = isAssistant && msg.locationInfo;
+      
+      // 판매자 색상 클래스 계산
+      let vendorColorClass = 'bg-blue-50';
+      if (isVendor && msg.vendorColor) {
+        vendorColorClass = msg.vendorColor;
+      } else if (isVendor && msg.vendorId) {
+        // 판매자 ID에 따라 일관된 색상 적용
+        const colorClasses = getVendorColorClasses(msg.vendorId);
+        vendorColorClass = typeof colorClasses === 'string' 
+          ? colorClasses 
+          : (colorClasses.className || 'bg-blue-50');
+      }
+      
+      // 식물 추천 카드 표시 (AI가 추천한 식물 목록)
+      if (isPlantRecommendation) {
+        return (
+          <div key={`rec-${index}`} className="my-3">
+            <PlantRecommendations 
+              recommendations={msg.recommendations || []}
+            />
+            {msg.content && <div className="mt-2 text-sm">{msg.content}</div>}
+          </div>
+        );
+      }
+      
+      // 업체 추천 카드 표시 (AI가 추천한 판매자 목록)
+      if (isVendorRecommendation) {
+        return (
+          <div key={`vrec-${index}`} className="my-3">
+            <VendorRecommendations 
+              vendors={msg.vendors || []}
+            />
+            {msg.content && <div className="mt-2 text-sm">{msg.content}</div>}
+          </div>
+        );
+      }
+      
+      // 위치 정보 표시 (지도 및 주소 정보)
+      if (isLocationInfo) {
+        return (
+          <div key={`loc-${index}`} className="my-3">
+            <MapLocationInfo 
+              location={msg.locationInfo || {}}
+            />
+            {msg.content && <div className="mt-2 text-sm">{msg.content}</div>}
+          </div>
+        );
+      }
+      
+      // 판매자 메시지이고 제품 정보가 있는 경우 통합된 카드 스타일로 표시
+      if (isVendor && msg.product) {
+        return (
+          <div key={`msg-${index}`} className={`my-3 rounded-lg p-4 ${vendorColorClass} shadow-sm`}>
+            <div className="flex items-center mb-2">
+              <div className="font-semibold">
+                {msg.vendorName || msg.storeName || '판매자'} 메시지:
+              </div>
+              <div className="ml-auto text-xs text-gray-500">
+                {new Date(msg.timestamp).toLocaleString('ko-KR', {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                })}
+              </div>
+            </div>
+            
+            {/* 제품 카드 표시 */}
+            <div className="bg-white rounded-lg p-3 border mb-3">
+              <div className="flex items-start gap-3">
+                {msg.product.imageUrl && (
+                  <img 
+                    src={msg.product.imageUrl} 
+                    alt={msg.product.name}
+                    className="w-20 h-20 object-cover rounded-md border border-gray-200"
+                    onClick={() => window.open(msg.product.imageUrl, '_blank')}
+                    style={{ cursor: 'pointer' }}
+                  />
+                )}
+                <div className="flex-1">
+                  <div className="font-semibold">{msg.product.name}</div>
+                  {msg.price && (
+                    <div className="text-sm text-green-600 font-semibold">
+                      {Number(msg.price).toLocaleString()}원
+                    </div>
+                  )}
+                  {msg.product.description && (
+                    <div className="text-xs text-gray-600 mt-1">
+                      {msg.product.description}
+                    </div>
+                  )}
+                  <button 
+                    className="mt-2 bg-green-600 text-white text-xs px-2 py-1 rounded"
+                    onClick={() => window.open(`/product/${msg.product.id}`, '_blank')}
+                  >
+                    이 상품 구매하기
+                  </button>
+                </div>
+              </div>
+            </div>
+            
+            {/* 메시지 내용 표시 */}
+            {msg.content && msg.content.trim() !== '' && (
+              <div className="bg-white p-3 rounded-lg">
+                <div className="flex items-center mb-1">
+                  <div className="text-sm font-medium">
+                    {msg.role === 'user' 
+                      ? '고객 메시지:' 
+                      : msg.role === 'assistant' 
+                        ? 'AI 상담사 메시지:' 
+                        : msg.role === 'vendor'
+                          ? (msg.vendorName || msg.storeName || '판매자') + ' 메시지:'
+                          : '메시지:'}
+                  </div>
+                </div>
+                <div className="text-sm">{msg.content}</div>
+              </div>
+            )}
+            
+            {/* 참조 이미지 표시 */}
+            {msg.referenceImages && Array.isArray(msg.referenceImages) && msg.referenceImages.length > 0 && (
+              <div className="mt-3">
+                <div className="text-sm font-medium mb-1">참고 이미지:</div>
+                <div className="flex flex-wrap gap-2">
+                  {msg.referenceImages.map((img: string, imgIndex: number) => (
+                    <img 
+                      key={`img-${imgIndex}`}
+                      src={img} 
+                      alt={`참조 이미지 ${imgIndex + 1}`}
+                      className="w-24 h-24 object-cover rounded-md border border-gray-200"
+                      onClick={() => window.open(img, '_blank')}
+                      style={{ cursor: 'pointer' }}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      }
+      
+      // 판매자 상태 메시지 (e.g. "입찰내용을 검토중입니다")
+      if (isVendor && (!msg.product && !msg.referenceImages) && 
+          msg.content && statusMessages.has(msg.content)) {
+        return (
+          <div key={`status-${index}`} className={`my-3 rounded-lg p-4 ${vendorColorClass} shadow-sm`}>
+            <div className="flex items-center mb-2">
+              <div className="font-semibold">
+                {msg.vendorName || msg.storeName || '판매자'} 메시지:
+              </div>
+              <div className="ml-auto text-xs text-gray-500">
+                {new Date(msg.timestamp).toLocaleString('ko-KR', {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                })}
+              </div>
+            </div>
+            <div className="text-center font-medium">
+              {msg.content}
+            </div>
+          </div>
+        );
+      }
+      
+      // 일반 메시지
+      const bgColorClass = 
+        isUser ? 'bg-primary/10' : 
+        isAssistant ? 'bg-white' :
+        vendorColorClass;
+      
+      return (
+        <div 
+          key={`msg-${index}`} 
+          className={`my-3 rounded-lg p-4 ${bgColorClass} shadow-sm break-words`}
+        >
+          <div className="flex items-center mb-2">
+            <div className="font-semibold">
+              {isUser ? user.name || '사용자' : 
+               isAssistant ? 'AI 상담사' :
+               isVendor ? (msg.vendorName || '판매자') :
+               '알 수 없음'}
+            </div>
+            <div className="ml-auto text-xs text-gray-500">
+              {new Date(msg.timestamp).toLocaleString('ko-KR', {
+                hour: '2-digit',
+                minute: '2-digit',
+              })}
+            </div>
+          </div>
+          <div className="chat-message-container whitespace-pre-wrap break-words text-sm">
+            {msg.content}
+            
+            {/* 일반 메시지에서 이미지만 있는 경우 처리 */}
+            {msg.role === 'vendor' && msg.imageUrl && !msg.referenceImages && !msg.product && (
+              <div className="mt-3">
+                <img 
+                  src={msg.imageUrl} 
+                  alt="제품 이미지"
+                  className="max-w-[200px] max-h-[200px] object-contain rounded-md border border-gray-200"
+                  onClick={() => window.open(msg.imageUrl, '_blank')}
+                  style={{ cursor: 'pointer' }}
+                />
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    });
+  };
+  
+  return (
+    <Card className={`flex flex-col h-full ${className}`}>
+      <CardHeader className="p-4 border-b flex-shrink-0">
+        <CardTitle className="text-lg">대화 내역</CardTitle>
+      </CardHeader>
+      
+      <CardContent className="p-4 overflow-auto flex-1 min-h-[450px]">
+        <div className="w-full pr-4 overflow-y-auto h-full max-h-[calc(100%-1rem)]" id="chat-container">
+          {wsConnected ? (
+            <>
+              {renderMessages()}
+              <div ref={chatEndRef} />
+            </>
+          ) : (
+            <Alert variant="destructive" className="mb-4">
+              <WifiOff className="h-4 w-4 mr-2" />
+              <AlertTitle>연결 오류</AlertTitle>
+              <AlertDescription>
+                {wsError || "실시간 채팅 연결이 해제되었습니다. 새로고침 해주세요."}
+              </AlertDescription>
+            </Alert>
+          )}
+        </div>
+      </CardContent>
+      
+      {/* 메시지 입력 영역 제거됨 */}
+    </Card>
+  );
+}
