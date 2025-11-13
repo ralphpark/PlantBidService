@@ -1,0 +1,4 @@
+#!/bin/bash
+sed -i '301s/content: `📦 배송 정보: ${order.buyerInfo?.address/content: `👤 구매자 정보:\n▪️ 이름: ${order.buyerInfo?.name || '"'"'이름 정보 없음'"'"'}\n▪️ 이메일: ${order.buyerInfo?.email || '"'"'이메일 정보 없음'"'"'}\n▪️ 연락처: ${order.buyerInfo?.phone || '"'"'연락처 정보 없음'"'"'}\n\n📦 배송 정보:\n▪️ 주소: ${order.buyerInfo?.address/' webhook-handler.ts
+
+sed -i '408s/content: `📦 배송 정보: ${order.buyerInfo?.address/content: `👤 구매자 정보:\n▪️ 이름: ${order.buyerInfo?.name || '"'"'이름 정보 없음'"'"'}\n▪️ 이메일: ${order.buyerInfo?.email || '"'"'이메일 정보 없음'"'"'}\n▪️ 연락처: ${order.buyerInfo?.phone || '"'"'연락처 정보 없음'"'"'}\n\n📦 배송 정보:\n▪️ 주소: ${order.buyerInfo?.address/' webhook-handler.ts

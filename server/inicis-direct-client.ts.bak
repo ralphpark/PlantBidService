@@ -1,0 +1,304 @@
+/**
+ * KG이니시스 직접 취소 API 클라이언트
+ * 이니시스 INIAPI 모듈 연동을 통한 직접 취소 구현
+ */
+import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
+import * as crypto from 'crypto';
+
+// 이니시스 API 키 설정
+const INICIS_API_KEY = process.env.INICIS_API_KEY || 'S1clN44uzgLhgsVi'; // INIAPI Key
+const INICIS_API_IV = process.env.INICIS_API_IV || 'nmHNqbyRYxTePR=='; // INIAPI IV
+const INICIS_HASH_KEY = process.env.INICIS_HASH_KEY || 'BEAFB1B74BB086E749E8989F5108C067'; // 해시키
+
+// 이니시스 상점정보
+const INICIS_MID = 'plantbid_v2_real'; // 상점아이디 (상점ID는 별도 환경변수에서 가져올 수 있음)
+const INICIS_API_URL = 'https://iniapi.inicis.com/api/v1'; // 이니시스 API URL
+
+/**
+ * 이니시스 직접 취소 API 클라이언트 클래스
+ */
+export class InicisDirectClient {
+  private client: AxiosInstance;
+  
+  constructor() {
+    console.log('[이니시스 직접 API 클라이언트 초기화]');
+    console.log('- INIAPI Key 설정 여부:', !!INICIS_API_KEY);
+    console.log('- INIAPI IV 설정 여부:', !!INICIS_API_IV);
+    console.log('- 해시키 길이:', INICIS_HASH_KEY.length);
+    console.log('- 사용 상점ID:', INICIS_MID);
+    
+    // 이니시스 API 클라이언트 초기화
+    const config: AxiosRequestConfig = {
+      baseURL: INICIS_API_URL,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      validateStatus: (status) => status < 500,
+      timeout: 10000 // 타임아웃 10초로 설정
+    };
+    
+    this.client = axios.create(config);
+    
+    // 로그 출력
+    console.log('이니시스 API 클라이언트 인스턴스 생성 완료');
+    
+    // 오류 로깅 인터셉터
+    this.client.interceptors.response.use(
+      response => {
+        console.log(`이니시스 API 응답 [${response.status}]:`, response.config.url, 
+                  response.data ? 'Data 받음' : 'No data');
+        return response;
+      },
+      error => {
+        if (error.response) {
+          console.error(`이니시스 API 오류 [${error.response.status}]:`, 
+                        error.response.data || error.message, 
+                        '\n요청 URL:', error.config?.url,
+                        '\n요청 방식:', error.config?.method);
+        } else if (error.request) {
+          console.error('이니시스 API 요청 오류 (응답 없음):', 
+                       error.message, 
+                       '\n요청 URL:', error.config?.url,
+                       '\n요청 방식:', error.config?.method);
+        } else {
+          console.error('이니시스 API 오류:', error.message);
+        }
+        return Promise.reject(error);
+      }
+    );
+  }
+  
+  /**
+   * AES-256 암호화 (이니시스 요청 데이터 암호화)
+   */
+  private encrypt(data: string): string {
+    try {
+      const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(INICIS_API_KEY), Buffer.from(INICIS_API_IV));
+      let encrypted = cipher.update(data, 'utf8', 'base64');
+      encrypted += cipher.final('base64');
+      return encrypted;
+    } catch (error) {
+      console.error('AES 암호화 오류:', error);
+      throw new Error('AES 암호화 오류');
+    }
+  }
+  
+  /**
+   * AES-256 복호화 (이니시스 응답 데이터 복호화)
+   */
+  private decrypt(data: string): string {
+    try {
+      const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(INICIS_API_KEY), Buffer.from(INICIS_API_IV));
+      let decrypted = decipher.update(data, 'base64', 'utf8');
+      decrypted += decipher.final('utf8');
+      return decrypted;
+    } catch (error) {
+      console.error('AES 복호화 오류:', error);
+      throw new Error('AES 복호화 오류');
+    }
+  }
+  
+  /**
+   * SHA-512 해시 생성 (이니시스 요청 검증용)
+   */
+  private generateHash(data: string): string {
+    try {
+      const hmac = crypto.createHmac('sha512', INICIS_HASH_KEY);
+      hmac.update(data);
+      return hmac.digest('hex');
+    } catch (error) {
+      console.error('SHA-512 해시 생성 오류:', error);
+      throw new Error('SHA-512 해시 생성 오류');
+    }
+  }
+  
+  /**
+   * 타임스탬프 생성
+   */
+  private getTimestamp(): string {
+    return Math.floor(Date.now() / 1000).toString();
+  }
+  
+  /**
+   * 이니시스 직접 결제 취소 API
+   */
+  async cancelPayment(params: {
+    tid: string;             // 이니시스 거래번호 (TID)
+    cancelMsg: string;       // 취소 사유
+    cancelAmount?: number;   // 취소 금액 (부분취소 시)
+    partialCancelCode?: string; // 부분취소 코드 (부분취소 시)
+  }): Promise<any> {
+    try {
+      console.log('\n=== 이니시스 직접 결제 취소 요청 시작 ===');
+      console.log('1. 취소 정보:');
+      console.log('- 결제 TID:', params.tid);
+      console.log('- 취소 사유:', params.cancelMsg);
+      console.log('- 취소 금액(optional):', params.cancelAmount || '전체 취소');
+      
+      // 타임스탬프 생성
+      const timestamp = this.getTimestamp();
+      
+      // 취소 요청 데이터 생성
+      const requestData = {
+        type: '부분취소' in params ? 'PartialRefund' : 'Refund', // 전체취소(Refund) 또는 부분취소(PartialRefund)
+        paymethod: 'Card',  // 결제수단 (카드 고정)
+        timestamp: timestamp,
+        clientIp: '127.0.0.1', // 서버 IP
+        mid: INICIS_MID,    // 상점 아이디
+        tid: params.tid,    // 이니시스 거래번호
+        msg: params.cancelMsg, // 취소 사유
+        price: params.cancelAmount ? params.cancelAmount.toString() : '', // 부분취소 금액 (전체취소 시 공백)
+        confirmPrice: params.cancelAmount ? params.cancelAmount.toString() : '', // 부분취소 금액 확인
+        partialCancelCode: params.partialCancelCode || '' // 부분취소 코드 (부분취소 시)
+      };
+      
+      // JSON 문자열 변환 및 로깅
+      const jsonData = JSON.stringify(requestData);
+      console.log('2. 이니시스 요청 데이터:', jsonData);
+      
+      // 데이터 암호화
+      const encryptedData = this.encrypt(jsonData);
+      console.log('3. 암호화된 데이터 길이:', encryptedData.length);
+      
+      // 해시 생성
+      const hash = this.generateHash(encryptedData + timestamp + INICIS_MID);
+      console.log('4. 생성된 해시값 일부:', hash.substring(0, 10) + '...');
+      
+      // API 요청 전송
+      console.log('5. API 요청 전송 시작:', INICIS_API_URL + '/refund');
+      const startTime = Date.now();
+      
+      // 이니시스 최종 요청 데이터
+      const payload = {
+        mid: INICIS_MID,
+        timestamp: timestamp,
+        data: encryptedData,
+        signature: hash
+      };
+      
+      // 이니시스 API 호출
+      const response = await this.client.post('/refund', payload);
+      
+      // 응답 처리
+      const endTime = Date.now();
+      const duration = endTime - startTime;
+      console.log(`\n6. 이니시스 API 응답 (소요시간: ${duration}ms):`);
+      console.log('- 응답 상태코드:', response.status);
+      
+      // 응답 데이터 확인
+      if (response.data && response.data.data) {
+        try {
+          // 암호화된 응답 데이터 복호화
+          const decryptedData = this.decrypt(response.data.data);
+          console.log('- 복호화된 응답 데이터:', decryptedData);
+          
+          // JSON 파싱
+          const resultData = JSON.parse(decryptedData);
+          
+          // 응답 코드 확인
+          if (resultData.resultCode === '00') {
+            console.log('✅ 이니시스 결제 취소 성공');
+            console.log('- 결과코드:', resultData.resultCode);
+            console.log('- 결과메시지:', resultData.resultMsg);
+            console.log('=== 이니시스 직접 결제 취소 요청 완료 ===\n');
+            return resultData;
+          } else {
+            console.error('! 이니시스 API 취소 실패 응답:', resultData);
+            throw new Error(`이니시스 취소 실패: ${resultData.resultMsg || '알 수 없는 오류'}`);
+          }
+        } catch (decryptError) {
+          console.error('! 이니시스 API 응답 복호화 오류:', decryptError);
+          throw new Error('이니시스 API 응답 복호화 오류');
+        }
+      } else {
+        console.error('! 이니시스 API 응답 데이터 없음:', response.data);
+        throw new Error('이니시스 API 응답 데이터 없음');
+      }
+    } catch (error: any) {
+      console.error('\n❌ 이니시스 직접 결제 취소 API 오류:');
+      
+      // 에러 디버깅을 위한 정보 추가
+      if (error.response) {
+        console.error('- 서버 응답 상태코드:', error.response.status);
+        console.error('- 서버 응답 데이터:', error.response.data);
+        console.error('- 오류 메시지:', error.message || '알 수 없는 오류');
+      } else {
+        console.error('- 오류 메시지:', error.message || '알 수 없는 오류');
+      }
+      
+      console.error('=== 이니시스 직접 결제 취소 요청 실패 ===\n');
+      throw new Error(`이니시스 결제 취소 오류: ${error.message || '알 수 없는 오류'}`);
+    }
+  }
+  
+  /**
+   * 이니시스 결제 정보 조회 API
+   */
+  async getPaymentInfo(tid: string): Promise<any> {
+    try {
+      console.log('\n=== 이니시스 결제 정보 조회 요청 시작 ===');
+      console.log('- 결제 TID:', tid);
+      
+      // 타임스탬프 생성
+      const timestamp = this.getTimestamp();
+      
+      // 조회 요청 데이터 생성
+      const requestData = {
+        type: 'PaymentInfo',
+        paymethod: 'Card',
+        timestamp: timestamp,
+        clientIp: '127.0.0.1',
+        mid: INICIS_MID,
+        tid: tid
+      };
+      
+      // JSON 문자열 변환
+      const jsonData = JSON.stringify(requestData);
+      
+      // 데이터 암호화
+      const encryptedData = this.encrypt(jsonData);
+      
+      // 해시 생성
+      const hash = this.generateHash(encryptedData + timestamp + INICIS_MID);
+      
+      // 이니시스 최종 요청 데이터
+      const payload = {
+        mid: INICIS_MID,
+        timestamp: timestamp,
+        data: encryptedData,
+        signature: hash
+      };
+      
+      // 이니시스 API 호출
+      const response = await this.client.post('/paymentinfo', payload);
+      
+      // 응답 처리
+      if (response.data && response.data.data) {
+        // 암호화된 응답 데이터 복호화
+        const decryptedData = this.decrypt(response.data.data);
+        
+        // JSON 파싱
+        const resultData = JSON.parse(decryptedData);
+        
+        // 응답 코드 확인
+        if (resultData.resultCode === '00') {
+          console.log('✅ 이니시스 결제 정보 조회 성공');
+          console.log('=== 이니시스 결제 정보 조회 요청 완료 ===\n');
+          return resultData;
+        } else {
+          throw new Error(`이니시스 결제 정보 조회 실패: ${resultData.resultMsg || '알 수 없는 오류'}`);
+        }
+      } else {
+        throw new Error('이니시스 API 응답 데이터 없음');
+      }
+    } catch (error: any) {
+      console.error('\n❌ 이니시스 결제 정보 조회 API 오류:', error.message || '알 수 없는 오류');
+      console.error('=== 이니시스 결제 정보 조회 요청 실패 ===\n');
+      throw new Error(`이니시스 결제 정보 조회 오류: ${error.message || '알 수 없는 오류'}`);
+    }
+  }
+}
+
+// 싱글톤 인스턴스 생성 및 내보내기
+const inicisClient = new InicisDirectClient();
+export default inicisClient;
