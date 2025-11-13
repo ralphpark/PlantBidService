@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+    <title>PlanB by simda - AI 기반 맞춤 식물 추천 & 지역 입찰형 판매 서비스</title>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500;600;700&family=Lato:wght@300;400;700&display=swap" rel="stylesheet">
+    <meta name="description" content="PlanB는 AI 기술을 활용한 맞춤형 식물 추천과 지역 기반 입찰 시스템을 제공하는 혁신적인 플랫폼입니다." />
+    
+    <!-- 결제 취소 이벤트를 부모 창에 전달하는 스크립트 -->
+    <script>
+      // 결제창이 닫힐 때 부모 창에 메시지 전송하는 코드
+      window.addEventListener('message', function(event) {
+        if (event.data && event.data.action === 'PAYMENT_WINDOW_OPENED') {
+          console.log('결제창이 열렸습니다. 이벤트 리스너 준비');
+        
+          const paymentIframe = document.querySelector('iframe[name^="imp"]');
+          if (paymentIframe) {
+            console.log('결제창 iframe 찾음:', paymentIframe);
+            
+            // 결제창 닫힘 이벤트 감지
+            const checkIframeInterval = setInterval(function() {
+              if (!document.contains(paymentIframe)) {
+                console.log('iframe이 DOM에서 제거됨 - 결제창 닫힘');
+                clearInterval(checkIframeInterval);
+                
+                // 부모 창에 결제 취소 메시지 전송
+                window.parent.postMessage({
+                  type: 'PORTONE_PAYMENT_CANCELED',
+                  message: '결제가 취소되었습니다.'
+                }, '*');
+              }
+            }, 500);
+          }
+        }
+      });
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+    <!-- Daum 우편번호 검색 API -->
+    <script type="text/javascript" src="https://t1.daumcdn.net/mapjsapi/bundle/postcode/prod/postcode.v2.js"></script>
+    <!-- 포트원 결제 모듈 V1 방식 (직접 결제 창 호출) -->
+    <script type="text/javascript" src="https://cdn.iamport.kr/js/iamport.payment-1.2.0.js"></script>
+    <!-- 포트원 결제 모듈 (V2 방식) - nonce 적용 및 crossorigin 설정 -->
+    <script src="https://cdn.portone.io/v2/browser-sdk.js" crossorigin="anonymous" defer></script>
+    <!-- This is a replit script which adds a banner on the top of the page when opened in development mode outside the replit environment -->
+    <script type="text/javascript" src="https://replit.com/public/js/replit-dev-banner.js"></script>
+  </body>
+</html>
