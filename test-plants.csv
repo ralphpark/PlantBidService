@@ -1,0 +1,3 @@
+name,imageUrl,scientificName,description,waterNeeds,light,humidity,temperature,winterTemperature,colorFeature,plantType,hasThorns,leafShape1,leafShape2,leafShape3,leafShape4,experienceLevel,petSafety,size,difficulty,priceRange,careInstructions,category
+테스트식물1,,Testus plantus,테스트용 식물입니다,보통,밝은 간접광,중간,20-25도,15도,초록색,관엽식물,false,타원형,,,,,초급,안전,중형,쉬움,1만원대,물을 주세요,관엽식물
+테스트식물2,,Testus secundus,두 번째 테스트 식물,적음,반음지,낮음,18-22도,12도,녹색,다육식물,false,둥근형,,,,,초급,안전,소형,쉬움,5천원대,가끔 물주기,다육식물
